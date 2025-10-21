@@ -298,26 +298,32 @@ make_fastq_summary() {
 # ----------------------------------------------------------
 qc_flags_from_nanoplot() {
     echo ">>> Deriving QC flags from NanoPlot per-read TSV ..."
-    local NP_TSV="results/nanoplot/all/NanoPlot-data.tsv"
+    local NP_DIR="results/nanoplot/all"
+    local NP_TSV="$NP_DIR/NanoPlot-data.tsv"
+    local NP_TSV_GZ="$NP_DIR/NanoPlot-data.tsv.gz"
     local STATS_TSV="results/summary/seqkit_stats.tsv"
+
+    if [ ! -f "$NP_TSV" ] && [ -f "$NP_TSV_GZ" ]; then
+        echo ">>> Found gzipped NanoPlot-data.tsv.gz — decompressing temporarily..."
+        gunzip -c "$NP_TSV_GZ" > "$NP_TSV"
+        local TMP_UNZIPPED=true
+    fi
+
     [ -f "$NP_TSV" ] || { echo "!!! Missing $NP_TSV (run quick_len_qual_overview first)"; return 1; }
     [ -f "$STATS_TSV" ] || { echo "!!! Missing $STATS_TSV (run make_fastq_summary first)"; return 1; }
 
     # Build a map: file_base -> N50 from seqkit_stats.tsv
-    # seqkit_stats.tsv header contains "file" and "N50" columns.
     awk -F'\t' 'NR==1{
         for(i=1;i<=NF;i++){h[$i]=i}
         fn=h["file"]; n50=h["N50"];
         next
     }
     {
-        # Extract basename only to match NanoPlot filename field
         f=$fn; gsub(/^.*\//,"",f);
         print f"\t"$n50
     }' "$STATS_TSV" > results/summary/.n50_map.tsv
 
-    # Parse NanoPlot-data.tsv: detect column indices by header (robust across versions)
-    # Expect columns containing (case-insensitive) names: "length", "mean_q", "filename" (or "source")
+    # Parse NanoPlot-data.tsv
     awk -F'\t' '
     BEGIN{IGNORECASE=1}
     NR==1{
@@ -333,7 +339,7 @@ qc_flags_from_nanoplot() {
     }
     {
         len=$L+0; q=$Q+0; file=$F
-        gsub(/^.*\//,"",file)         # keep basename only
+        gsub(/^.*\//,"",file)
         key=file
         total[key]++
         sumq[key]+=q
@@ -354,6 +360,12 @@ qc_flags_from_nanoplot() {
     }' "$NP_TSV" | sort -k1,1 > results/summary/qc_flags.tsv
 
     rm -f results/summary/.n50_map.tsv
+
+    if [ "${TMP_UNZIPPED:-false}" = true ]; then
+        echo ">>> Cleaning up temporary uncompressed NanoPlot-data.tsv ..."
+        rm -f "$NP_TSV"
+    fi
+
     echo ">>> Wrote results/summary/qc_flags.tsv"
 }
 
@@ -426,8 +438,8 @@ build_fastq_meta
 run_fastqc_all
 run_multiqc
 quick_len_qual_overview
-run_pycoqc_optional
-primer_spotcheck
+#run_pycoqc_optional
+#primer_spotcheck
 make_fastq_summary
 qc_flags_from_nanoplot
 plot_fastq_length_boxplots
