@@ -9,6 +9,12 @@
 
 set -euo pipefail
 
+#User-tunable vars for threads and optional primer/summary inputs
+THREADS="${THREADS:-4}"
+PRIMER_FWD="${PRIMER_FWD:-}"
+PRIMER_REV="${PRIMER_REV:-}"
+SEQ_SUMMARY="${SEQ_SUMMARY:-}"
+
 # ----------------------------------------------------------
 # Function: ensure_channels
 #   Reset channels to a clean, known-good order and strict priority.
@@ -53,7 +59,8 @@ create_env_libsQC() {
     mamba create -n libsQC \
       -c conda-forge -c bioconda \
       python=3.11 "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
-      "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 -y
+      "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 \
+      nanostat nanoplot -y
     status=$?
     set -e
 
@@ -62,7 +69,8 @@ create_env_libsQC() {
         mamba create -n libsQC \
           -c conda-forge -c bioconda --channel-priority flexible \
           python=3.11 "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
-          "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 -y
+          "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 \
+          nanostat nanoplot -y
         echo ">>> Created 'libsQC' with flexible priority."
     else
         echo ">>> Environment 'libsQC' created successfully (strict priority)."
@@ -198,6 +206,158 @@ run_multiqc() {
 }
 
 # ----------------------------------------------------------
+# Function: quick_len_qual_overview
+#   - Quick length & quality overview for ONT using NanoStat & NanoPlot
+# ----------------------------------------------------------
+quick_len_qual_overview() {
+    echo ">>> Quick length & quality overview with NanoStat/NanoPlot ..."
+    mkdir -p results/nanoplot results/nanostat
+
+    # Per-file NanoStat TSVs
+    for f in "${FASTQ_FILES[@]}"; do
+        base="${f##*/}"; base="${base%.gz}"
+        NanoStat --fastq "$f" --threads "${THREADS}" \
+          --outdir "results/nanostat/${base}.stat" \
+          --name "${base%.fastq}" >/dev/null
+        echo "    NanoStat -> results/nanostat/${base}.stat"
+    done
+
+    # Combined NanoPlot: including --tsv_stats to also get a per-read table
+    NanoPlot --threads "${THREADS}" --fastq "${FASTQ_FILES[@]}" \
+      --N50 --loglength --plots hex dot kde --tsv_stats --raw \
+      -o results/nanoplot/all
+    echo ">>> NanoPlot HTML/PNGs + TSV in results/nanoplot/all"
+}
+
+# ----------------------------------------------------------
+# Function: run_pycoqc_optional
+# ----------------------------------------------------------
+run_pycoqc_optional() {
+    if [ -n "$SEQ_SUMMARY" ] && [ -f "$SEQ_SUMMARY" ]; then
+        echo ">>> Running pycoQC on $SEQ_SUMMARY ..."
+        mkdir -p results/pycoqc
+        pycoQC -f "$SEQ_SUMMARY" -o results/pycoqc/pycoqc_report.html
+        echo ">>> pycoQC report: results/pycoqc/pycoqc_report.html"
+    else
+        echo ">>> pycoQC skipped (set SEQ_SUMMARY to an existing sequencing_summary.txt)"
+    fi
+}
+
+# ----------------------------------------------------------
+# Function: primer_spotcheck
+# ----------------------------------------------------------
+primer_spotcheck() {
+    if [ -z "$PRIMER_FWD" ] && [ -z "$PRIMER_REV" ]; then
+        echo ">>> Primer spot-check skipped (set PRIMER_FWD/PRIMER_REV to enable)."
+        return 0
+    fi
+    echo ">>> Primer/adapter residuals spot-check with cutadapt (no trimming)..."
+    mkdir -p results/primer_checks
+    for f in "${FASTQ_FILES[@]}"; do
+        base="${f##*/}"; base="${base%.gz}"
+        args=()
+        [ -n "$PRIMER_FWD" ] && args+=( -g "^${PRIMER_FWD}" )
+        [ -n "$PRIMER_REV" ] && args+=( -a "${PRIMER_REV}\$" )
+        cutadapt "${args[@]}" --report=minimal --no-trim -j "${THREADS}" \
+          -o /dev/null "$f" > "results/primer_checks/${base%.fastq}.cutadapt_report.txt"
+        echo "    cutadapt -> results/primer_checks/${base%.fastq}.cutadapt_report.txt"
+    done
+    echo ">>> Review hit rates; high matches mean more trimming may be needed."
+}
+
+# ----------------------------------------------------------
+# Function: make_fastq_summary
+#   - Build compact per-FASTQ summary with SeqKit (incl. N50)
+#   - Ensure NanoPlot per-read TSV exists for downstream analysis
+# ----------------------------------------------------------
+make_fastq_summary() {
+    echo ">>> Summarizing FASTQs with SeqKit and NanoPlot TSV ..."
+    mkdir -p results/summary
+
+    # Per-file stats (tab-separated) with SeqKit
+    # Columns (seqkit -a -T): file, format, type, num_seqs, sum_len, min_len, avg_len, max_len, Q1, Q2, Q3, sum_gap, N50
+    seqkit stats -a -T "${FASTQ_FILES[@]}" > results/summary/seqkit_stats.tsv
+    echo ">>> Wrote results/summary/seqkit_stats.tsv"
+
+    # Ensure NanoPlot per-read TSV was generated (quick_len_qual_overview should have produced this)
+    if [ ! -f results/nanoplot/all/NanoPlot-data.tsv ]; then
+        echo ">>> NanoPlot per-read TSV missing; generating now ..."
+        NanoPlot --threads "${THREADS}" --fastq "${FASTQ_FILES[@]}" \
+          --N50 --loglength --tsv_stats --raw \
+          -o results/nanoplot/all >/dev/null
+    fi
+    echo ">>> NanoPlot per-read TSV: results/nanoplot/all/NanoPlot-data.tsv"
+}
+
+# ----------------------------------------------------------
+# Function: qc_flags_from_nanoplot
+#   - Derive simple flags per library from NanoPlot per-read TSV (no primers needed)
+#   - Outputs: results/summary/qc_flags.tsv with:
+#       file_base, total_reads, pct_len_200_700, pct_len_ge_1000, mean_read_q, N50
+#   - N50 is joined from results/summary/seqkit_stats.tsv
+# ----------------------------------------------------------
+qc_flags_from_nanoplot() {
+    echo ">>> Deriving QC flags from NanoPlot per-read TSV ..."
+    local NP_TSV="results/nanoplot/all/NanoPlot-data.tsv"
+    local STATS_TSV="results/summary/seqkit_stats.tsv"
+    [ -f "$NP_TSV" ] || { echo "!!! Missing $NP_TSV (run quick_len_qual_overview first)"; return 1; }
+    [ -f "$STATS_TSV" ] || { echo "!!! Missing $STATS_TSV (run make_fastq_summary first)"; return 1; }
+
+    # Build a map: file_base -> N50 from seqkit_stats.tsv
+    # seqkit_stats.tsv header contains "file" and "N50" columns.
+    awk -F'\t' 'NR==1{
+        for(i=1;i<=NF;i++){h[$i]=i}
+        fn=h["file"]; n50=h["N50"];
+        next
+    }
+    {
+        # Extract basename only to match NanoPlot filename field
+        f=$fn; gsub(/^.*\//,"",f);
+        print f"\t"$n50
+    }' "$STATS_TSV" > results/summary/.n50_map.tsv
+
+    # Parse NanoPlot-data.tsv: detect column indices by header (robust across versions)
+    # Expect columns containing (case-insensitive) names: "length", "mean_q", "filename" (or "source")
+    awk -F'\t' '
+    BEGIN{IGNORECASE=1}
+    NR==1{
+        for(i=1;i<=NF;i++){
+            if($i ~ /length/) L=i
+            else if($i ~ /mean_q|qmean|average_q/) Q=i
+            else if($i ~ /filename|source|file/) F=i
+        }
+        if(!L || !Q || !F){
+            print "!!! Could not find length/mean_q/filename columns in NanoPlot-data.tsv" > "/dev/stderr"; exit 1
+        }
+        next
+    }
+    {
+        len=$L+0; q=$Q+0; file=$F
+        gsub(/^.*\//,"",file)         # keep basename only
+        key=file
+        total[key]++
+        sumq[key]+=q
+        if(len>=200 && len<=700) its[key]++
+        if(len>=1000) full16s[key]++
+    }
+    END{
+        print "file_base\ttotal_reads\tpct_len_200_700\tpct_len_ge_1000\tmean_read_q\tN50"
+        while((getline < "results/summary/.n50_map.tsv")>0){
+            split($0,a,"\t"); n50[a[1]]=a[2]
+        }
+        for(k in total){
+            pct_its = (its[k]>0? (its[k]/total[k])*100 : 0)
+            pct_16s = (full16s[k]>0? (full16s[k]/total[k])*100 : 0)
+            meanq   = (sumq[k]/total[k])
+            printf "%s\t%d\t%.2f\t%.2f\t%.3f\t%s\n", k, total[k], pct_its, pct_16s, meanq, (k in n50 ? n50[k] : "NA")
+        }
+    }' "$NP_TSV" | sort -k1,1 > results/summary/qc_flags.tsv
+
+    rm -f results/summary/.n50_map.tsv
+    echo ">>> Wrote results/summary/qc_flags.tsv"
+}
+
+# ----------------------------------------------------------
 # Function: plot_fastq_length_boxplots
 #   - Builds results/lengths/all_lengths.tsv from FASTQ_FILES
 #   - Then calls workflow/plot_fastq_lengths.R to make one figure with all boxplots
@@ -265,4 +425,9 @@ gather_fastq_files
 build_fastq_meta
 run_fastqc_all
 run_multiqc
+quick_len_qual_overview
+run_pycoqc_optional
+primer_spotcheck
+make_fastq_summary
+qc_flags_from_nanoplot
 plot_fastq_length_boxplots
