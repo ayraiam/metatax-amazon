@@ -15,6 +15,16 @@ PRIMER_FWD="${PRIMER_FWD:-}"
 PRIMER_REV="${PRIMER_REV:-}"
 SEQ_SUMMARY="${SEQ_SUMMARY:-}"
 
+#pick a GNU time binary and initialize a peak-RAM accumulator
+if command -v /usr/bin/time >/dev/null 2>&1; then
+  TIME_CMD="/usr/bin/time -v"
+elif command -v gtime >/dev/null 2>&1; then   # macOS (brew install gnu-time)
+  TIME_CMD="gtime -v"
+else
+  TIME_CMD=""
+fi
+MAX_RSS_KB=0   # tracks maximum "Maximum resident set size (kbytes)"
+
 # ----------------------------------------------------------
 # Function: ensure_channels
 #   Reset channels to a clean, known-good order and strict priority.
@@ -574,7 +584,14 @@ log_run_report() {
     echo "System       : ${host}"                                >> "$logfile"
     echo "Conda env fingerprint: ${env_hash}"                    >> "$logfile"
     echo "Threads used: ${THREADS}"                              >> "$logfile"
-    echo "Total runtime: ${minutes} min ${seconds} sec"          >> "$logfile"
+    # peak memory line (from GNU time -v); show nice GB, fallback if N/A
+    if [ "${MAX_RSS_KB:-0}" -gt 0 ]; then
+        local max_gb
+        max_gb=$(awk "BEGIN{printf \"%.2f\", ${MAX_RSS_KB}/1048576}")
+        echo "Max RAM used: ${MAX_RSS_KB} KB (${max_gb} GB)"    >> "$logfile"
+    else
+        echo "Max RAM used: N/A (GNU time -v not available)"     >> "$logfile"
+    fi
     echo                                                        >> "$logfile"
 
     # Aggregated timing summary (Total, Count, Avg)
@@ -604,12 +621,39 @@ time_function() {
     local fn="$1"
     local start=$(date +%s)
     echo ">>> Running $fn ..."
-    $fn
+
+    # wrap the call with GNU time -v when available, parse Max RSS
+    local status=0
+    if [ -n "$TIME_CMD" ]; then
+        mkdir -p logs
+        local tlog="logs/.time_${fn}_$RANDOM.log"
+        set +e
+        $TIME_CMD bash -c "$fn" 2> "$tlog"
+        status=$?
+        set -e
+        # pull "Maximum resident set size (kbytes): N"
+        if [ -f "$tlog" ]; then
+            local rss_kb
+            rss_kb=$(awk -F': *' '/Maximum resident set size/ {print $2}' "$tlog" | tr -d ' ')
+            if [[ "$rss_kb" =~ ^[0-9]+$ ]] && [ "$rss_kb" -gt "$MAX_RSS_KB" ]; then
+                MAX_RSS_KB="$rss_kb"
+            fi
+            rm -f "$tlog"
+        fi
+    else
+        # fallback: run normally (no peak RAM available)
+        set +e
+        $fn
+        status=$?
+        set -e
+    fi
+
     local end=$(date +%s)
     local dur=$((end - start))
     mkdir -p logs
     echo -e "${fn}\t${dur}" >> logs/.timing.tsv
     echo ">>> $fn completed in ${dur}s"
+    return $status
 }
 
 # ==========================================================
