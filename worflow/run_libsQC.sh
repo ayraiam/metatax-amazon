@@ -60,17 +60,19 @@ create_env_libsQC() {
       -c conda-forge -c bioconda \
       python=3.11 "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
       "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 \
-      nanostat nanoplot -y
+      nanostat nanoplot \
+      "cutadapt>=4.5" nanofilt -y
     status=$?
     set -e
 
     if [ $status -ne 0 ]; then
         echo "!!! Strict-priority solve failed. Retrying once with flexible channel priority..."
-        mamba create -n libsQC \
-          -c conda-forge -c bioconda --channel-priority flexible \
+         mamba create -n libsQC \
+          -c conda-forge -c bioconda \
           python=3.11 "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
           "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 \
-          nanostat nanoplot -y
+          nanostat nanoplot \
+          "cutadapt>=4.5" nanofilt -y
         echo ">>> Created 'libsQC' with flexible priority."
     else
         echo ">>> Environment 'libsQC' created successfully (strict priority)."
@@ -207,26 +209,85 @@ run_multiqc() {
 
 # ----------------------------------------------------------
 # Function: quick_len_qual_overview
-#   - Quick length & quality overview for ONT using NanoStat & NanoPlot
+#   - Combined NanoPlot HTML for all FASTQs
+#   - Per-file NanoPlot raw TSVs so we can aggregate per library
 # ----------------------------------------------------------
 quick_len_qual_overview() {
-    echo ">>> Quick length & quality overview with NanoStat/NanoPlot ..."
-    mkdir -p results/nanoplot results/nanostat
+    local LABEL="${1:-pre}"   # "pre" (default) or "post"
+    echo ">>> Quick length & quality overview with NanoStat/NanoPlot (${LABEL}) ..."
+    mkdir -p results/nanoplot results/nanostat results/nanoplot/per_file
 
-    # Per-file NanoStat TSVs
+    # Debug header to confirm inputs
+    echo ">>> FASTQ_FILES count: ${#FASTQ_FILES[@]}"
+    printf '    %s\n' "${FASTQ_FILES[@]:0:3}"
+    [ ${#FASTQ_FILES[@]} -gt 3 ] && echo "    ..."
+
+    # Per-file NanoStat TSVs (non-fatal)
     for f in "${FASTQ_FILES[@]}"; do
-        base="${f##*/}"; base="${base%.gz}"
+        base="$(basename "$f")"
+        base="${base%.fastq.gz}"
+        base="${base%.fq.gz}"
+        base="${base%.fastq}"
+        base="${base%.fq}"
+        base="${base%.}"  # remove any stray trailing dot
+
+        set +e
         NanoStat --fastq "$f" --threads "${THREADS}" \
           --outdir "results/nanostat/${base}.stat" \
-          --name "${base%.fastq}" >/dev/null
-        echo "    NanoStat -> results/nanostat/${base}.stat"
+          --name "${base}" >/dev/null
+        ns_status=$?
+        set -e
+        if [ "$ns_status" -ne 0 ]; then
+            echo "!!! NanoStat FAILED on $base (exit $ns_status) — continuing."
+        else
+            echo "    NanoStat -> results/nanostat/${base}.stat"
+        fi
     done
 
-    # Combined NanoPlot: including --tsv_stats to also get a per-read table
+    # Phase-specific combined NanoPlot (HTML + per-read TSV)
+    local ALL_OUTDIR="results/nanoplot/all_${LABEL}"
+    mkdir -p "${ALL_OUTDIR}"
+    set +e
     NanoPlot --threads "${THREADS}" --fastq "${FASTQ_FILES[@]}" \
       --N50 --loglength --plots hex dot kde --tsv_stats --raw \
-      -o results/nanoplot/all
-    echo ">>> NanoPlot HTML/PNGs + TSV in results/nanoplot/all"
+      -o "${ALL_OUTDIR}" \
+      1>"${ALL_OUTDIR}/NanoPlot.stdout.log" \
+      2>"${ALL_OUTDIR}/NanoPlot.stderr.log"
+    np_status=$?
+    set -e
+    if [ "$np_status" -eq 0 ]; then
+      echo ">>> Combined NanoPlot (${LABEL}): HTML/PNGs (+ per-read TSV) in ${ALL_OUTDIR}"
+    else
+      echo "!!! Combined NanoPlot (${LABEL}) FAILED (exit $np_status). Skipping combined overview."
+      echo "    See ${ALL_OUTDIR}/NanoPlot.stderr.log for details."
+    fi
+
+    # Per-file NanoPlot raw TSVs (normalize base naming; non-fatal)
+    echo ">>> Generating per-file NanoPlot raw TSVs (${LABEL}) ..."
+    for f in "${FASTQ_FILES[@]}"; do
+        b="$(basename "$f")"
+        b="${b%.fastq.gz}"
+        b="${b%.fq.gz}"
+        b="${b%.fastq}"
+        b="${b%.fq}"
+        b="${b%.}"  # remove any stray trailing dot
+
+        outdir="results/nanoplot/per_file/${b}"
+        mkdir -p "$outdir"
+
+        set +e
+        NanoPlot --threads "${THREADS}" --fastq "$f" \
+          --N50 --loglength --tsv_stats --raw \
+          -o "$outdir" >/dev/null 2>&1
+        p_status=$?
+        set -e
+        if [ "$p_status" -ne 0 ]; then
+            echo "!!! NanoPlot raw FAILED for $b (exit $p_status) — continuing."
+        else
+            echo "    NanoPlot raw -> $outdir/NanoPlot-data.tsv(.gz)"
+        fi
+    done
+    echo ">>> Per-file NanoPlot raw TSVs ready under results/nanoplot/per_file/"
 }
 
 # ----------------------------------------------------------
@@ -266,117 +327,170 @@ primer_spotcheck() {
 }
 
 # ----------------------------------------------------------
+# Function: filter_amplicons  (global mode)
+# ----------------------------------------------------------
+filter_amplicons() {
+  echo ">>> Global length + Q filtering (multi-marker libraries: ITS + 16S + LSU) ..."
+  mkdir -p results/filtered
+
+  local MEANQ="${MEANQ:-10}"          # minimum mean quality
+  local LEN_MIN="${LEN_MIN:-200}"     # min read length to keep
+  local LEN_MAX="${LEN_MAX:-3300}"    # max read length to keep (extended for LSU)
+
+  for f in "${FASTQ_FILES[@]}"; do
+    base="${f##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
+    out="results/filtered/${base}.filtered.fastq.gz"
+
+    echo "    Filtering $base  (keep ${LEN_MIN}-${LEN_MAX} bp, Q ≥ ${MEANQ})"
+
+    # optional primer trim if sequences are known
+    tmp="results/filtered/${base}.tmp.fastq.gz"
+    if [ -n "$PRIMER_FWD" ] || [ -n "$PRIMER_REV" ]; then
+      cutadapt -j "${THREADS}" \
+        $( [ -n "$PRIMER_FWD" ] && echo -g "^${PRIMER_FWD}" ) \
+        $( [ -n "$PRIMER_REV" ] && echo -a "${PRIMER_REV}\$" ) \
+        -o "$tmp" "$f" >/dev/null
+    else
+      cp "$f" "$tmp"
+    fi
+
+    # main length + Q filter
+    zcat "$tmp" \
+      | NanoFilt -q "$MEANQ" -l "$LEN_MIN" --maxlength "$LEN_MAX" \
+      | gzip > "$out"
+    rm -f "$tmp"
+
+    echo "    -> $out"
+  done
+
+  echo ">>> Filtered FASTQs written to results/filtered/"
+}
+
+# ----------------------------------------------------------
+# Function: re_qc_filtered
+#   - Re-run QC on results/filtered/*.fastq.gz
+#   - Produces parallel reports so you can compare before/after
+# ----------------------------------------------------------
+re_qc_filtered() {
+  echo ">>> Re-QC on filtered FASTQs ..."
+  shopt -s nullglob
+  FASTQ_FILES=( results/filtered/*.fastq.gz )
+  shopt -u nullglob
+  if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
+    echo "!!! No filtered FASTQs found in results/filtered/"
+    return 1
+  fi
+
+  # FastQC/MultiQC on filtered
+  mkdir -p results/qc_filtered
+  fastqc -t "${THREADS}" -o results/qc_filtered "${FASTQ_FILES[@]}"
+  mkdir -p results/multiqc_filtered
+  multiqc -o results/multiqc_filtered results/qc_filtered
+
+  # NanoPlot/NanoStat + summaries on filtered
+  quick_len_qual_overview         # reuses function; operates on current FASTQ_FILES
+  make_fastq_summary
+  qc_flags_from_nanoplot
+  plot_fastq_length_boxplots
+
+  echo ">>> Re-QC complete. See results/multiqc_filtered and results/nanoplot/*"
+}
+
+# ----------------------------------------------------------
 # Function: make_fastq_summary
 #   - Build compact per-FASTQ summary with SeqKit (incl. N50)
 #   - Ensure NanoPlot per-read TSV exists for downstream analysis
+#   - Relaxed: do NOT force-create combined 'all' anymore; accept pre/post dirs
 # ----------------------------------------------------------
 make_fastq_summary() {
     echo ">>> Summarizing FASTQs with SeqKit and NanoPlot TSV ..."
     mkdir -p results/summary
 
-    # Per-file stats (tab-separated) with SeqKit
-    # Columns (seqkit -a -T): file, format, type, num_seqs, sum_len, min_len, avg_len, max_len, Q1, Q2, Q3, sum_gap, N50
     seqkit stats -a -T "${FASTQ_FILES[@]}" > results/summary/seqkit_stats.tsv
     echo ">>> Wrote results/summary/seqkit_stats.tsv"
 
-    # Ensure NanoPlot per-read TSV was generated (quick_len_qual_overview should have produced this)
-    if [ ! -f results/nanoplot/all/NanoPlot-data.tsv ]; then
-        echo ">>> NanoPlot per-read TSV missing; generating now ..."
-        NanoPlot --threads "${THREADS}" --fastq "${FASTQ_FILES[@]}" \
-          --N50 --loglength --tsv_stats --raw \
-          -o results/nanoplot/all >/dev/null
+    # If at least one combined NanoPlot exists (pre or post), we're good; else just skip creating.
+    if [ -f results/nanoplot/all_pre/NanoPlot-data.tsv ] || [ -f results/nanoplot/all_post/NanoPlot-data.tsv ]; then
+        echo ">>> Found combined NanoPlot per-read TSV (pre/post)."
+    else
+        echo ">>> No combined NanoPlot per-read TSV found (pre/post). Skipping generation."
     fi
-    echo ">>> NanoPlot per-read TSV: results/nanoplot/all/NanoPlot-data.tsv"
 }
 
 # ----------------------------------------------------------
 # Function: qc_flags_from_nanoplot
-#   - Derive simple flags per library from NanoPlot per-read TSV (no primers needed)
-#   - Outputs: results/summary/qc_flags.tsv with:
-#       file_base, total_reads, pct_len_200_700, pct_len_ge_1000, mean_read_q, N50
-#   - N50 is joined from results/summary/seqkit_stats.tsv
+#   - Aggregate per-file NanoPlot raw TSVs (quals/lengths) into summary per library
+#   - Columns: file_base, total_reads, pct_len_200_700, pct_len_ge_1000, mean_read_q
+#   - Output: results/summary/qc_flags.tsv
 # ----------------------------------------------------------
 qc_flags_from_nanoplot() {
-    echo ">>> Deriving QC flags from NanoPlot per-read TSV ..."
-    local NP_DIR="results/nanoplot/all"
-    local NP_TSV="$NP_DIR/NanoPlot-data.tsv"
-    local NP_TSV_GZ="$NP_DIR/NanoPlot-data.tsv.gz"
+    echo ">>> Deriving QC flags from per-file NanoPlot raw TSVs ..."
     local STATS_TSV="results/summary/seqkit_stats.tsv"
-
-    if [ ! -f "$NP_TSV" ] && [ -f "$NP_TSV_GZ" ]; then
-        echo ">>> Found gzipped NanoPlot-data.tsv.gz — decompressing temporarily..."
-        gunzip -c "$NP_TSV_GZ" > "$NP_TSV"
-        local TMP_UNZIPPED=true
-    fi
-
-    [ -f "$NP_TSV" ] || { echo "!!! Missing $NP_TSV (run quick_len_qual_overview first)"; return 1; }
     [ -f "$STATS_TSV" ] || { echo "!!! Missing $STATS_TSV (run make_fastq_summary first)"; return 1; }
 
-    # Build a map: file_base -> N50 from seqkit_stats.tsv
-    awk -F'\t' 'NR==1{
-        for(i=1;i<=NF;i++){h[$i]=i}
-        fn=h["file"]; n50=h["N50"];
-        next
-    }
-    {
-        f=$fn; gsub(/^.*\//,"",f);
-        print f"\t"$n50
-    }' "$STATS_TSV" > results/summary/.n50_map.tsv
+    echo ">>> Aggregating per-file NanoPlot raw TSVs ..."
+    mkdir -p results/summary
 
-    # Parse NanoPlot-data.tsv
-    awk -F'\t' '
-    BEGIN{IGNORECASE=1}
-    NR==1{
-        for(i=1;i<=NF;i++){
-            if($i ~ /length/) L=i
-            else if($i ~ /mean_q|qmean|average_q/) Q=i
-            else if($i ~ /filename|source|file/) F=i
-        }
-        if(!L || !Q || !F){
-            print "!!! Could not find length/mean_q/filename columns in NanoPlot-data.tsv" > "/dev/stderr"; exit 1
-        }
-        next
-    }
-    {
-        len=$L+0; q=$Q+0; file=$F
-        gsub(/^.*\//,"",file)
-        key=file
-        total[key]++
-        sumq[key]+=q
-        if(len>=200 && len<=700) its[key]++
-        if(len>=1000) full16s[key]++
-    }
-    END{
-        print "file_base\ttotal_reads\tpct_len_200_700\tpct_len_ge_1000\tmean_read_q\tN50"
-        while((getline < "results/summary/.n50_map.tsv")>0){
-            split($0,a,"\t"); n50[a[1]]=a[2]
-        }
-        for(k in total){
-            pct_its = (its[k]>0? (its[k]/total[k])*100 : 0)
-            pct_16s = (full16s[k]>0? (full16s[k]/total[k])*100 : 0)
-            meanq   = (sumq[k]/total[k])
-            printf "%s\t%d\t%.2f\t%.2f\t%.3f\t%s\n", k, total[k], pct_its, pct_16s, meanq, (k in n50 ? n50[k] : "NA")
-        }
-    }' "$NP_TSV" | sort -k1,1 > results/summary/qc_flags.tsv
+    # Write header first
+    echo -e "file_base\ttotal_reads\tpct_len_200_700\tpct_len_ge_1000\tmean_read_q" > results/summary/qc_flags.tsv
 
-    rm -f results/summary/.n50_map.tsv
+    shopt -s nullglob
+    local found=false
+    for tsv in results/nanoplot/per_file/*/NanoPlot-data.tsv results/nanoplot/per_file/*/NanoPlot-data.tsv.gz; do
+        [ -e "$tsv" ] || continue
+        found=true
+        base="$(basename "$(dirname "$tsv")")"
 
-    if [ "${TMP_UNZIPPED:-false}" = true ]; then
-        echo ">>> Cleaning up temporary uncompressed NanoPlot-data.tsv ..."
-        rm -f "$NP_TSV"
+        if [[ "$tsv" == *.gz ]]; then
+            reader="gunzip -c \"$tsv\""
+        else
+            reader="cat \"$tsv\""
+        fi
+
+        eval $reader | awk -F'\t' -v base="$base" '
+          BEGIN{IGNORECASE=1}
+          NR==1{
+            for(i=1;i<=NF;i++){
+              if($i~/^lengths?$|length/) L=i
+              else if($i~/^quals$|mean_q|qmean|average_q|quality/) Q=i
+            }
+            next
+          }
+          {
+            len=$L+0; q=$Q+0
+            total++; sumq+=q
+            if(len>=200 && len<=700) its++
+            if(len>=1000) full16s++
+          }
+          END{
+            if(total>0){
+              pct_its  = (its/total)*100
+              pct_16s  = (full16s/total)*100
+              meanq    = (sumq/total)
+              printf "%s\t%d\t%.2f\t%.2f\t%.3f\n", base, total, pct_its, pct_16s, meanq
+            }
+          }' >> results/summary/qc_flags.tsv
+    done
+    shopt -u nullglob
+
+    if [ "$found" = false ]; then
+        echo "!!! No per-file NanoPlot raw TSVs found. Did quick_len_qual_overview run?"
+        rm -f results/summary/qc_flags.tsv
+        return 1
     fi
 
-    echo ">>> Wrote results/summary/qc_flags.tsv"
+    echo ">>> Wrote simplified QC summary: results/summary/qc_flags.tsv"
 }
 
 # ----------------------------------------------------------
 # Function: plot_fastq_length_boxplots
-#   - Builds results/lengths/all_lengths.tsv from FASTQ_FILES
-#   - Then calls workflow/plot_fastq_lengths.R to make one figure with all boxplots
-#   - Env var SAMPLE_N (optional): subsample N reads per file (0 = all reads)
+#   - Builds results/lengths/all_lengths.tsv for R plotting (consumed by the R script)
+#   - Then renames outputs to *_<LABEL>.*
+#   - Also writes a copy of the input table to all_lengths_<LABEL>.tsv for bookkeeping
 # ----------------------------------------------------------
 plot_fastq_length_boxplots() {
-    echo ">>> Preparing read-length boxplots for FASTQs in data/ ..."
+    local LABEL="${1:-pre}"   # "pre" (default) or "post"
+    echo ">>> Preparing read-length boxplots for FASTQs in data/ (${LABEL}) ..."
     [ -d results/lengths ] || mkdir -p results/lengths
 
     if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
@@ -406,40 +520,157 @@ plot_fastq_length_boxplots() {
         echo "    wrote results/lengths/${base}.len.tsv"
     done
 
-		# combine to a tidy table with header
-        {
-          echo -e "sample\tlength"
-          cat results/lengths/*.len.tsv
-        } > results/lengths/all_lengths.tsv
+    {
+      echo -e "sample\tlength"
+      cat results/lengths/*.len.tsv
+    } > results/lengths/all_lengths.tsv
 
-        echo ">>> Combined table: results/lengths/all_lengths.tsv"
+    echo ">>> Combined table: results/lengths/all_lengths.tsv"
+    rm -f results/lengths/*.len.tsv
+    echo ">>> Removed temporary per-file .len.tsv files; only all_lengths.tsv retained."
 
-        rm -f results/lengths/*.len.tsv
-        echo ">>> Removed temporary per-file .len.tsv files; only all_lengths.tsv retained."
+    if [ ! -f workflow/plot_fastq_lengths.R ]; then
+        echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
+        return 1
+    fi
 
-        if [ ! -f workflow/plot_fastq_lengths.R ]; then
-            echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
-            return 1
-        fi
+    echo ">>> Running R to generate the boxplot figure..."
+    Rscript workflow/plot_fastq_lengths.R
 
-        echo ">>> Running R to generate the boxplot figure..."
-        Rscript workflow/plot_fastq_lengths.R
-        echo ">>> Plots saved to results/lengths/read_length_boxplots.png and .pdf"
+    # Keep phase-specific copies
+    cp results/lengths/all_lengths.tsv "results/lengths/all_lengths_${LABEL}.tsv" || true
+    [ -f results/lengths/read_length_boxplots.png ] && mv results/lengths/read_length_boxplots.png "results/lengths/read_length_boxplots_${LABEL}.png"
+    [ -f results/lengths/read_length_boxplots.pdf ] && mv results/lengths/read_length_boxplots.pdf "results/lengths/read_length_boxplots_${LABEL}.pdf"
+
+    echo ">>> Plots saved to results/lengths/read_length_boxplots_${LABEL}.png and .pdf"
+}
+
+# ----------------------------------------------------------
+# Function: log_run_report
+#   - Records runtime, threads, system info, and per-function timing
+#   - Saves a summary text file to logs/run_report_<timestamp>.txt
+# ----------------------------------------------------------
+log_run_report() {
+    # Ensure logs directory exists
+    if [ ! -d logs ]; then
+        echo ">>> Creating logs/ directory..."
+        mkdir -p logs
+    fi
+
+    local logfile="logs/run_report_$(date +%Y%m%d_%H%M%S).txt"
+    local end_time=$(date +%s)
+    local runtime=$((end_time - START_TIME))
+    local minutes=$((runtime / 60))
+    local seconds=$((runtime % 60))
+
+    # System and environment info
+    local host=$(hostname)
+    local env_hash=$(conda env export --name libsQC 2>/dev/null | sha256sum | cut -c1-12)
+
+    echo "=================================================="    > "$logfile"
+    echo " QC RUN REPORT — $(date)"                              >> "$logfile"
+    echo "=================================================="   >> "$logfile"
+    echo "Environment : libsQC"                                  >> "$logfile"
+    echo "System       : ${host}"                                >> "$logfile"
+    echo "Conda env fingerprint: ${env_hash}"                    >> "$logfile"
+    echo "Threads used: ${THREADS}"                              >> "$logfile"
+    echo "Total runtime: ${minutes} min ${seconds} sec"          >> "$logfile"
+    echo                                                        >> "$logfile"
+
+    # Aggregated timing summary (Total, Count, Avg)
+    echo "Function timing summary (aggregated):"                 >> "$logfile"
+    printf "%-30s %10s %8s %10s\n" "Function" "Total(s)" "n" "Avg(s)" >> "$logfile"
+    printf "%-30s %10s %8s %10s\n" "--------" "--------" "--" "------" >> "$logfile"
+    awk -F'\t' '
+      {tot[$1]+=$2; cnt[$1]++}
+      END{
+        for (k in tot) {
+          printf "%-30s %10d %8d %10.1f\n", k, tot[k], cnt[k], (cnt[k]? tot[k]/cnt[k] : 0)
+        }
+      }' logs/.timing.tsv >> "$logfile" 2>/dev/null || true
+
+    echo                                                        >> "$logfile"
+    echo "Report saved to: $logfile"                             >> "$logfile"
+    echo ">>> Run report complete."
+    echo ">>> Total runtime: ${minutes}m ${seconds}s — report saved to ${logfile}"
+}
+
+# ----------------------------------------------------------
+# Helper: time_function
+#   - Wraps a function call and logs its duration
+#   - Usage: time_function run_fastqc_all
+# ----------------------------------------------------------
+time_function() {
+    local fn="$1"
+    local start=$(date +%s)
+    echo ">>> Running $fn ..."
+    $fn
+    local end=$(date +%s)
+    local dur=$((end - start))
+    mkdir -p logs
+    echo -e "${fn}\t${dur}" >> logs/.timing.tsv
+    echo ">>> $fn completed in ${dur}s"
 }
 
 # ==========================================================
-# Calling the functions:
+# Calling the functions (QC pipeline main flow)
 # ==========================================================
-create_env_libsQC
-check_versions
-export_env
-gather_fastq_files
-build_fastq_meta
-run_fastqc_all
-run_multiqc
-quick_len_qual_overview
-#run_pycoqc_optional
-#primer_spotcheck
-make_fastq_summary
-qc_flags_from_nanoplot
-plot_fastq_length_boxplots
+
+START_TIME=$(date +%s)
+
+# Reset per-run timing file so reports don't accumulate across runs
+[ -d logs ] || mkdir -p logs
+: > logs/.timing.tsv
+
+#Environment setup --------------------------------------------------------
+time_function create_env_libsQC
+time_function check_versions
+time_function export_env
+
+#Input discovery ---------------------------------------------------------
+time_function gather_fastq_files
+time_function build_fastq_meta
+
+#Initial QC on raw data --------------------------------------------------
+time_function run_fastqc_all
+time_function run_multiqc
+
+# Nanopore-specific QC (pre-filter) -----------------------------------
+time_function 'quick_len_qual_overview pre'
+
+# Summaries and QC flags --------------------------------------------------
+time_function make_fastq_summary
+time_function qc_flags_from_nanoplot
+time_function 'plot_fastq_length_boxplots pre'
+
+# Filtering step ----------------------------------------------------------
+time_function filter_amplicons
+
+# Re-QC on filtered data (post-filter) --------------------------------
+# Swap FASTQ_FILES to the filtered set happens inside re_qc_filtered
+re_qc_filtered() {
+  echo ">>> Re-QC on filtered FASTQs ..."
+  shopt -s nullglob
+  FASTQ_FILES=( results/filtered/*.fastq.gz )
+  shopt -u nullglob
+  if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
+    echo "!!! No filtered FASTQs found in results/filtered/"
+    return 1
+  fi
+
+  mkdir -p results/qc_filtered
+  fastqc -t "${THREADS}" -o results/qc_filtered "${FASTQ_FILES[@]}"
+  mkdir -p results/multiqc_filtered
+  multiqc -o results/multiqc_filtered results/qc_filtered
+
+  quick_len_qual_overview post
+  make_fastq_summary
+  qc_flags_from_nanoplot
+  plot_fastq_length_boxplots post
+
+  echo ">>> Re-QC complete. See results/multiqc_filtered and results/nanoplot/*"
+}
+time_function re_qc_filtered
+
+#Final report ------------------------------------------------------------
+log_run_report
