@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this pipeline, please cite it as below."
+title: "Metatax-Amazon: A long-read metataxonomic workflow for characterizing Amazonian soil microbial communities"
+authors:
+  - family-names: Lobo
+    given-names: Igor
+    affiliation: AY:RΔ - data and discovery in flow
+version: "0.1.0"
+date-released: XXXX-XX-XX
+repository-code: "https://github.com/ayraiam/metatax-amazon"
+license: MIT
+keywords:
+  - metataxonomy
+  - nanopore
+  - quality-control
+  - bioinformatics
