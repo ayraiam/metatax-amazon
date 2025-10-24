@@ -1,0 +1,6 @@
+partition: "express"
+time: "04:00:00"
+cpus: 4
+mem: "16G"
+chdir: "."
+export: "ALL"
