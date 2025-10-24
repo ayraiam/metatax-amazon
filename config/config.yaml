@@ -1,0 +1,8 @@
+threads: 4
+mean_q: 10
+len_min: 200
+len_max: 3300
+use_pycoqc: false
+plots:
+  loglength: true
+  n50: true
