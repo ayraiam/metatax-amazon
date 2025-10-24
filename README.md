@@ -25,48 +25,63 @@ enabling reproducible exploration of microbial community structure and compositi
 </pre>
 
 <pre>
-STRUCTURE [TO BE UPDATED] 
+STRUCTURE [TO BE UPDATED]
 ---------
- /scripts/      → processing and plotting scripts (Bash, Python, R)
- /config/       → parameters and reference database paths
- /data/         → example input and metadata
- /results/      → output tables and figures
+ /workflow/     - main pipeline scripts
+ /envs/         - Conda/Mamba environment YAMLs
+ /metadata/     - sample and sequencing metadata tables
+ /config/       - configuration files for parameters and paths
+ /docs/         - usage and documentation
+ LICENSE        - project license (MIT)
+ CITATION.cff   - citation metadata for referencing this work
+ bootstrap.sh   - environment and directory setup script
+ README.md      - this file
 </pre>
 
 <pre>
 DEPENDENCIES [TO BE UPDATED]
 ------------
  - Python ≥ 3.10
- - R ≥ 4.2
- - QIIME2
- - Snakemake
- - Pandas · Matplotlib · Phyloseq
+ - R ≥ 4.3
+ - Conda or Mamba
+ - Slurm (or compatible scheduler)
+ - NanoPlot · FastQC · MultiQC · SeqKit · Cutadapt · NanoFilt
 </pre>
 
 <pre>
 USAGE [TO BE UPDATED]
 -----
-Example (individual scripts):
+Example (cluster execution):
 
-  bash scripts/01_preprocess_reads.sh data/ input.fastq
-  Rscript scripts/04_diversity_analysis.R results/otu_table.tsv
+  bash workflow/runall.sh \
+    --partition express \
+    --time 06:00:00 \
+    --cpus 8 \
+    --mem 32G \
+    --primer-fwd GCTTCTTCCGATCT \
+    --primer-rev AGATCGGAAGAGC \
+    --seq-summary metadata/sequencing_summary.txt
 </pre>
 
 <pre>
-CITATION
+CITATION [TO BE UPDATED]
 --------
 If you use this pipeline, please cite:
 
-Lobo, I (2025)
-AY:RΔ – data and discovery in flow.
-github.com/ayraiam/metatax-amazon
+Lobo, I. (2025).
+Metatax-Amazon: A reproducible long-read metataxonomy pipeline
+for Amazonian soil microbiome analysis.
+AY:RΔ - data and discovery in flow.
+https://github.com/ayraiam/metatax-amazon
+
+See CITATION.cff for full citation metadata.
 </pre>
 
 <pre>
-CONTACT
+CONTACT [TO BE UPDATED]
 -------
 email: ayrabioinf@gmail.com
-linkedin: [TO BE UPDATED]
+linkedin: https://www.linkedin.com/company/aryaiam
 </pre>
 
 <p align="center"><sub>© 2025 AY:RΔ — data and discovery in flow</sub></p>
