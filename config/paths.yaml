@@ -1,0 +1,4 @@
+data_dir: "data/"
+results_dir: "results/"
+logs_dir: "logs/"
+env_file: "envs/libsQC.yml"
