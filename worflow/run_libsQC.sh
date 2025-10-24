@@ -397,11 +397,11 @@ re_qc_filtered() {
   mkdir -p results/multiqc_filtered
   multiqc -o results/multiqc_filtered results/qc_filtered
 
-  # NanoPlot/NanoStat + summaries on filtered
-  quick_len_qual_overview         # reuses function; operates on current FASTQ_FILES
+  # NanoPlot/NanoStat + summaries on filtered (post)
+  quick_len_qual_overview post
   make_fastq_summary
   qc_flags_from_nanoplot
-  plot_fastq_length_boxplots
+  plot_fastq_length_boxplots post
 
   echo ">>> Re-QC complete. See results/multiqc_filtered and results/nanoplot/*"
 }
@@ -622,31 +622,41 @@ time_function() {
     local start=$(date +%s)
     echo ">>> Running $fn ..."
 
-    # wrap the call with GNU time -v when available, parse Max RSS
-    local status=0
-    if [ -n "$TIME_CMD" ]; then
-        mkdir -p logs
-        local tlog="logs/.time_${fn}_$RANDOM.log"
-        set +e
-        $TIME_CMD bash -c "$fn" 2> "$tlog"
-        status=$?
-        set -e
-        # pull "Maximum resident set size (kbytes): N"
-        if [ -f "$tlog" ]; then
-            local rss_kb
-            rss_kb=$(awk -F': *' '/Maximum resident set size/ {print $2}' "$tlog" | tr -d ' ')
-            if [[ "$rss_kb" =~ ^[0-9]+$ ]] && [ "$rss_kb" -gt "$MAX_RSS_KB" ]; then
-                MAX_RSS_KB="$rss_kb"
+    # Functions that MUST run in the current shell (no subshell), or they won't persist state.
+    case "$fn" in
+        gather_fastq_files|re_qc_filtered)
+            # Run directly in current shell; no GNU time wrapping
+            set +e
+            $fn
+            status=$?
+            set -e
+            ;;
+        *)
+            # Safe to wrap with GNU time (subshell OK)
+            local status=0
+            if [ -n "$TIME_CMD" ]; then
+                mkdir -p logs
+                local tlog="logs/.time_${fn}_$RANDOM.log"
+                set +e
+                $TIME_CMD bash -c "$fn" 2> "$tlog"
+                status=$?
+                set -e
+                if [ -f "$tlog" ]; then
+                    local rss_kb
+                    rss_kb=$(awk -F': *' '/Maximum resident set size/ {print $2}' "$tlog" | tr -d ' ')
+                    if [[ "$rss_kb" =~ ^[0-9]+$ ]] && [ "$rss_kb" -gt "${MAX_RSS_KB:-0}" ]; then
+                        MAX_RSS_KB="$rss_kb"
+                    fi
+                    rm -f "$tlog"
+                fi
+            else
+                set +e
+                $fn
+                status=$?
+                set -e
             fi
-            rm -f "$tlog"
-        fi
-    else
-        # fallback: run normally (no peak RAM available)
-        set +e
-        $fn
-        status=$?
-        set -e
-    fi
+            ;;
+    esac
 
     local end=$(date +%s)
     local dur=$((end - start))
@@ -689,31 +699,6 @@ time_function 'plot_fastq_length_boxplots pre'
 
 # Filtering step ----------------------------------------------------------
 time_function filter_amplicons
-
-# Re-QC on filtered data (post-filter) --------------------------------
-# Swap FASTQ_FILES to the filtered set happens inside re_qc_filtered
-re_qc_filtered() {
-  echo ">>> Re-QC on filtered FASTQs ..."
-  shopt -s nullglob
-  FASTQ_FILES=( results/filtered/*.fastq.gz )
-  shopt -u nullglob
-  if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
-    echo "!!! No filtered FASTQs found in results/filtered/"
-    return 1
-  fi
-
-  mkdir -p results/qc_filtered
-  fastqc -t "${THREADS}" -o results/qc_filtered "${FASTQ_FILES[@]}"
-  mkdir -p results/multiqc_filtered
-  multiqc -o results/multiqc_filtered results/qc_filtered
-
-  quick_len_qual_overview post
-  make_fastq_summary
-  qc_flags_from_nanoplot
-  plot_fastq_length_boxplots post
-
-  echo ">>> Re-QC complete. See results/multiqc_filtered and results/nanoplot/*"
-}
 time_function re_qc_filtered
 
 #Final report ------------------------------------------------------------
