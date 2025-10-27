@@ -1,0 +1,32 @@
+# Large, generated, or machine-specific
+data/
+results/
+logs/
+refdb/
+
+# Common artifacts
+*.log
+*.out
+*.err
+*.tmp
+*.bak
+*.swp
+*.html
+*.pdf
+*.png
+*.svg
+*.zip
+*.tar*
+*.gz
+
+# Conda/mamba
+.conda/
+.mamba/
+conda-meta/
+*.lock
+
+# Workflow engines
+.snakemake/
+.nf-work/
+.work/
+.cache/
