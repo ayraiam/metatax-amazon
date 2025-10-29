@@ -64,7 +64,7 @@ Example (cluster execution):
 </pre>
 
 <pre>
-CITATION [TO BE UPDATED]
+CITATION
 --------
 If you use this pipeline, please cite:
 
