@@ -9,6 +9,18 @@
 
 set -euo pipefail
 
+# Initialize conda in non-interactive shells -----------------------
+if ! command -v conda >/dev/null 2>&1; then  #
+  for CAND in "$HOME/mambaforge" "$HOME/miniforge3" "$HOME/miniconda3" "/opt/conda"; do
+    if [ -f "$CAND/etc/profile.d/conda.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$CAND/etc/profile.d/conda.sh"
+      break
+    fi
+  done
+fi
+# ---------------------------------------------------------------------------
+
 #User-tunable vars for threads and optional primer/summary inputs
 THREADS="${THREADS:-4}"
 PRIMER_FWD="${PRIMER_FWD:-}"
@@ -54,25 +66,31 @@ create_env_libsQC() {
     # Only ensure channels & clean index if we need to CREATE the env
     ensure_channels
 
+    # Choose solver with fallback to conda ------------------------
+    local SOLVER="mamba"
+    command -v mamba >/dev/null 2>&1 || SOLVER="conda"
+    echo ">>> Using solver: ${SOLVER}"
+    # -----------------------------------------------------------------------
+
     echo ">>> Environment 'libsQC' not found. Creating it now (strict priority)..."
     set +e
-    mamba create -n libsQC \
+    ${SOLVER} create -n libsQC \
       -c conda-forge -c bioconda \
       python=3.11 "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
       "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 \
       nanostat nanoplot \
-      "cutadapt>=4.5" nanofilt -y
+      "cutadapt>=4.5" nanofilt pycoqc -y
     status=$?
     set -e
 
     if [ $status -ne 0 ]; then
         echo "!!! Strict-priority solve failed. Retrying once with flexible channel priority..."
-         mamba create -n libsQC \
+        ${SOLVER} create -n libsQC \
           -c conda-forge -c bioconda \
           python=3.11 "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
           "seqkit>=2.6" fastqc=0.12.1 multiqc=1.21 \
           nanostat nanoplot \
-          "cutadapt>=4.5" nanofilt -y
+          "cutadapt>=4.5" nanofilt pycoqc -y
         echo ">>> Created 'libsQC' with flexible priority."
     else
         echo ">>> Environment 'libsQC' created successfully (strict priority)."
@@ -278,7 +296,7 @@ quick_len_qual_overview() {
         set +e
         NanoPlot --threads "${THREADS}" --fastq "$f" \
           --N50 --loglength --tsv_stats --raw \
-          -o "$outdir" >/dev/null 2>&1
+          -o "$outdir" >/devnull 2>&1
         p_status=$?
         set -e
         if [ "$p_status" -ne 0 ]; then
@@ -294,13 +312,13 @@ quick_len_qual_overview() {
 # Function: run_pycoqc_optional
 # ----------------------------------------------------------
 run_pycoqc_optional() {
-    if [ -n "$SEQ_SUMMARY" ] && [ -f "$SEQ_SUMMARY" ]; then
+    if [ -n "$SEQ_SUMMARY" ] && [ -f "$SEQ_SUMMARY" ] && command -v pycoQC >/dev/null 2>&1; then
         echo ">>> Running pycoQC on $SEQ_SUMMARY ..."
         mkdir -p results/pycoqc
         pycoQC -f "$SEQ_SUMMARY" -o results/pycoqc/pycoqc_report.html
         echo ">>> pycoQC report: results/pycoqc/pycoqc_report.html"
     else
-        echo ">>> pycoQC skipped (set SEQ_SUMMARY to an existing sequencing_summary.txt)"
+        echo ">>> pycoQC skipped (set SEQ_SUMMARY and ensure 'pycoqc' is installed)."
     fi
 }
 
