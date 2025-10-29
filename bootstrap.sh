@@ -14,7 +14,7 @@ echo ">>> Bootstrapping MetaTax-Amazon project..."
 # ----------------------------------------------------------
 # 1) Create runtime directories (not tracked by git)
 # ----------------------------------------------------------
-for dir in data results logs refdb; do
+for dir in data results logs refdb metadata; do
   if [ ! -d "$dir" ]; then
     echo ">>> Creating $dir/"
     mkdir -p "$dir"
