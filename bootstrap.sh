@@ -2,18 +2,19 @@
 # ==========================================================
 # Script: bootstrap.sh
 # Purpose: Prepare the environment and directory structure
-#          so the libsQC pipeline can run immediately after clone.
+#          so the MetaTax-Amazon pipelines (libsQC + Emu Amplicons)
+#          can run immediately after clone.
 # Usage:   bash bootstrap.sh
 # ==========================================================
 
 set -euo pipefail
 
-echo ">>> Bootstrapping Meta-Amazon project..."
+echo ">>> Bootstrapping MetaTax-Amazon project..."
 
 # ----------------------------------------------------------
 # 1) Create runtime directories (not tracked by git)
 # ----------------------------------------------------------
-for dir in data results logs; do
+for dir in data results logs refdb; do
   if [ ! -d "$dir" ]; then
     echo ">>> Creating $dir/"
     mkdir -p "$dir"
@@ -48,11 +49,26 @@ else
   echo ">>> Environment 'libsQC' already exists."
 fi
 
+# # ----------------------------------------------------------
+# # 4) (Optional) Create the 'emu-env' environment if missing
+# # ----------------------------------------------------------
+# # <<< ADDED (supports Emu pipeline right away)
+# if ! $MAMBA env list | grep -qE '^emu-env\s'; then
+#   if [ -f envs/emu-env.yml ]; then
+#     echo ">>> Creating environment 'emu-env' from envs/emu-env.yml..."
+#     $MAMBA env create -f envs/emu-env.yml
+#   else
+#     echo ">>> No envs/emu-env.yml found. The run_emu_amplicons.sh script will create it automatically later."
+#   fi
+# else
+#   echo ">>> Environment 'emu-env' already exists."
+# fi
+
 # ----------------------------------------------------------
-# 4) Done
+# 5) Done
 # ----------------------------------------------------------
 echo ">>> Bootstrap complete!"
-echo ">>> You can now run:"
-echo "      bash workflow/run_libsQC.sh"
+echo ">>> You can now run either:"
+echo "      bash workflow/runall.sh           # libsQC (Slurm submission)"
 echo "   or"
-echo "      bash workflow/runall.sh  (for Slurm)"
+echo "      bash workflow/run_emu_amplicons.sh # Emu classification stage"
