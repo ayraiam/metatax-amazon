@@ -54,13 +54,14 @@ USAGE [TO BE UPDATED]
 Example (cluster execution):
 
   bash workflow/runall.sh \
-    --partition express \
-    --time 06:00:00 \
-    --cpus 8 \
-    --mem 32G \
-    --primer-fwd GCTTCTTCCGATCT \
-    --primer-rev AGATCGGAAGAGC \
-    --seq-summary metadata/sequencing_summary.txt
+  --partition short \
+  --time 04:00:00 \
+  --cpus 4 \
+  --mem 16G \
+  --wd "$PWD"
+# optional flags:
+#   --primer-fwd SEQ --primer-rev SEQ
+#   --seq-summary /path/to/sequencing_summary.txt
 </pre>
 
 <pre>
