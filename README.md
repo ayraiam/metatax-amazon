@@ -55,8 +55,8 @@ Example (cluster execution):
 
   bash workflow/runall.sh \
   --partition short \
-  --time 04:00:00 \
-  --cpus 4 \
+  --time 08:00:00 \
+  --cpus 8 \
   --mem 16G \
   --wd "$PWD"
 # optional flags:
