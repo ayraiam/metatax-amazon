@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ==========================================================
 # Script: workflow/runall.sh
-# Purpose: Submit libsQC run via Slurm (srun) and log output
+# Purpose: Submit libsQC run via Slurm (srun) and optionally
+#          run Emu Amplicons afterward.
 # ==========================================================
 
 set -euo pipefail
@@ -16,11 +17,21 @@ PRIMER_FWD=""
 PRIMER_REV=""
 SEQ_SUMMARY=""
 
+RUN_EMU=1
+RUN_LIBSQC=1
+
+EMU_PARTITION=""
+EMU_TIME=""
+EMU_CPUS=""
+EMU_MEM=""
+EMU_DB_ITS_DIR=""
+EMU_DB_LSU_DIR=""
+
 # --- Help message ---
 usage() {
   echo "Usage: bash workflow/runall.sh [options]"
   echo
-  echo "Options:"
+  echo "General:"
   echo "  --partition STR       Partition/queue name (default: short)"
   echo "  --time HH:MM:SS       Walltime (default: 04:00:00)"
   echo "  --cpus INT            CPUs per task (default: 4)"
@@ -29,6 +40,19 @@ usage() {
   echo "  --primer-fwd SEQ      Forward primer sequence (optional)"
   echo "  --primer-rev SEQ      Reverse primer sequence (optional)"
   echo "  --seq-summary PATH    Path to sequencing_summary.txt (optional)"
+  echo
+  echo "Stage control:"
+  echo "  --no-qc               Skip libsQC step (run Emu only)"
+  echo "  --no-emu              Skip Emu step (run libsQC only)"
+  echo
+  echo "Emu options:"
+  echo "  --emu-partition STR   Emu partition (default: inherit libsQC)"
+  echo "  --emu-time HH:MM:SS   Emu walltime (default: inherit libsQC)"
+  echo "  --emu-cpus INT        Emu CPUs (default: inherit libsQC)"
+  echo "  --emu-mem STR         Emu memory (default: inherit libsQC)"
+  echo "  --emu-db-its PATH     Emu ITS DB directory (optional)"
+  echo "  --emu-db-lsu PATH     Emu LSU DB directory (optional)"
+  echo
   echo "  -h, --help            Show this help message"
   exit 0
 }
@@ -44,56 +68,90 @@ while [[ $# -gt 0 ]]; do
     --primer-fwd) PRIMER_FWD="$2"; shift 2 ;;
     --primer-rev) PRIMER_REV="$2"; shift 2 ;;
     --seq-summary) SEQ_SUMMARY="$2"; shift 2 ;;
+    --no-emu) RUN_EMU=0; shift 1 ;;
+    --no-qc|--skip-libsQC) RUN_LIBSQC=0; shift 1 ;;
+    --emu-partition) EMU_PARTITION="$2"; shift 2 ;;
+    --emu-time) EMU_TIME="$2"; shift 2 ;;
+    --emu-cpus) EMU_CPUS="$2"; shift 2 ;;
+    --emu-mem) EMU_MEM="$2"; shift 2 ;;
+    --emu-db-its) EMU_DB_ITS_DIR="$2"; shift 2 ;;
+    --emu-db-lsu) EMU_DB_LSU_DIR="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "Unknown argument: $1"; usage ;;
   esac
 done
 
-# --- Ensure logs directory exists ---
-mkdir -p logs
+EMU_PARTITION="${EMU_PARTITION:-$PARTITION}"
+EMU_TIME="${EMU_TIME:-$TIME}"
+EMU_CPUS="${EMU_CPUS:-$CPUS}"
+EMU_MEM="${EMU_MEM:-$MEM}"
 
-# --- Create timestamped log files ---
+mkdir -p logs
 TS=$(date +%Y%m%d_%H%M%S)
 OUT_LOG="logs/run_${TS}.out"
 ERR_LOG="logs/run_${TS}.err"
+EMU_OUT_LOG="logs/emu_${TS}.out"
+EMU_ERR_LOG="logs/emu_${TS}.err"
 
-# --- Print run configuration ---
 echo "============================================"
-echo "Running libsQC with the following parameters:"
-echo "  Partition : $PARTITION"
-echo "  Time      : $TIME"
-echo "  CPUs      : $CPUS"
-echo "  Memory    : $MEM"
-echo "  Work dir  : $WDIR"
-[ -n "$PRIMER_FWD" ] && echo "  Primer FWD: $PRIMER_FWD"
-[ -n "$PRIMER_REV" ] && echo "  Primer REV: $PRIMER_REV"
-[ -n "$SEQ_SUMMARY" ] && echo "  Seq summary: $SEQ_SUMMARY"
+echo "libsQC:  ${RUN_LIBSQC}"
+echo "Emu:     ${RUN_EMU}"
+echo "--------------------------------------------"
+echo "Partition : $PARTITION"
+echo "Time      : $TIME"
+echo "CPUs      : $CPUS"
+echo "Memory    : $MEM"
+echo "Work dir  : $WDIR"
 echo "============================================"
-echo "Logs will be written to:"
-echo "  STDOUT -> $OUT_LOG"
-echo "  STDERR -> $ERR_LOG"
 echo
 
-# --- Export thread variables for good measure ---
 export OMP_NUM_THREADS="$CPUS"
 export MKL_NUM_THREADS="$CPUS"
 export NUMEXPR_NUM_THREADS="$CPUS"
 
-# --- Submit the job ---
-srun \
-  --partition="$PARTITION" \
-  --nodes=1 \
-  --ntasks=1 \
-  --cpus-per-task="$CPUS" \
-  --mem="$MEM" \
-  --time="$TIME" \
-  --chdir="$WDIR" \
-  --export=ALL,THREADS="$CPUS",PRIMER_FWD="$PRIMER_FWD",PRIMER_REV="$PRIMER_REV",SEQ_SUMMARY="$SEQ_SUMMARY" \
-  /bin/bash workflow/run_libsQC.sh \
-  1>"$OUT_LOG" \
-  2>"$ERR_LOG"
+# --- libsQC step ---
+if [[ "$RUN_LIBSQC" -eq 1 ]]; then
+  echo ">>> Launching libsQC..."
+  srun \
+    --partition="$PARTITION" \
+    --nodes=1 \
+    --ntasks=1 \
+    --cpus-per-task="$CPUS" \
+    --mem="$MEM" \
+    --time="$TIME" \
+    --chdir="$WDIR" \
+    --export=ALL,THREADS="$CPUS",PRIMER_FWD="$PRIMER_FWD",PRIMER_REV="$PRIMER_REV",SEQ_SUMMARY="$SEQ_SUMMARY" \
+    /bin/bash workflow/run_libsQC.sh \
+    1>"$OUT_LOG" \
+    2>"$ERR_LOG"
+else
+  echo ">>> Skipping libsQC (--no-qc)"
+fi
+
+# --- Emu step ---
+if [[ "$RUN_EMU" -eq 1 ]]; then
+  echo ">>> Launching Emu Amplicons..."
+  export OMP_NUM_THREADS="$EMU_CPUS"
+  export MKL_NUM_THREADS="$EMU_CPUS"
+  export NUMEXPR_NUM_THREADS="$EMU_CPUS"
+
+  srun \
+    --partition="$EMU_PARTITION" \
+    --nodes=1 \
+    --ntasks=1 \
+    --cpus-per-task="$EMU_CPUS" \
+    --mem="$EMU_MEM" \
+    --time="$EMU_TIME" \
+    --chdir="$WDIR" \
+    --export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR" \
+    /bin/bash workflow/run_emu_amplicons.sh \
+    1>"$EMU_OUT_LOG" \
+    2>"$EMU_ERR_LOG"
+else
+  echo ">>> Skipping Emu (--no-emu)"
+fi
 
 echo
-echo ">>> Job finished. Check logs:"
-echo "    $OUT_LOG"
-echo "    $ERR_LOG"
+echo ">>> Jobs finished. Check logs:"
+[ "$RUN_LIBSQC" -eq 1 ] && echo "  $OUT_LOG / $ERR_LOG"
+[ "$RUN_EMU" -eq 1 ] && echo "  $EMU_OUT_LOG / $EMU_ERR_LOG"
