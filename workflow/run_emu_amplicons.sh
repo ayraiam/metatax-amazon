@@ -40,7 +40,7 @@ EMU_TYPE="${EMU_TYPE:-map-ont}"
 LOGDIR="logs"
 OUTDIR="results"
 METADIR="metadata"
-mkdir -p "$OUTDIR" "$METADIR" refdb
+mkdir -p "$OUTDIR" "$METADIR" refdb "$LOGDIR"
 
 RUN_LOG="${LOGDIR}/run_emu_amplicons.$(date +%Y%m%d_%H%M%S).log"
 touch "$RUN_LOG"
