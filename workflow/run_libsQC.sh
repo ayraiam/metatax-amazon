@@ -13,7 +13,6 @@ set -euo pipefail
 if ! command -v conda >/dev/null 2>&1; then  #
   for CAND in "$HOME/mambaforge" "$HOME/miniforge3" "$HOME/miniconda3" "/opt/conda"; do
     if [ -f "$CAND/etc/profile.d/conda.sh" ]; then
-      # shellcheck disable=SC1091
       source "$CAND/etc/profile.d/conda.sh"
       break
     fi
@@ -26,6 +25,39 @@ THREADS="${THREADS:-4}"
 PRIMER_FWD="${PRIMER_FWD:-}"
 PRIMER_REV="${PRIMER_REV:-}"
 SEQ_SUMMARY="${SEQ_SUMMARY:-}"
+
+# primer trimming tolerance, list support, and report dirs
+PRIMER_ERR="${PRIMER_ERR:-0.10}"        # max mismatch rate for cutadapt matches
+PRIMER_FWD_LIST="${PRIMER_FWD_LIST:-$PRIMER_FWD}"   # CSV or single value
+PRIMER_REV_LIST="${PRIMER_REV_LIST:-$PRIMER_REV}"   # CSV or single value
+PRIMER_CHECK_DIR="results/primer_checks"
+PRIMER_TRIM_DIR="results/primer_trimming"
+
+# internal arrays built from lists (parsed later)
+FORWARD_PRIMERS=()
+REVERSE_PRIMERS=()
+
+# parse CSV env vars into arrays (trim spaces, drop empties)
+parse_primers() {
+  IFS=',' read -ra _tmpF <<< "$PRIMER_FWD_LIST"
+  IFS=',' read -ra _tmpR <<< "$PRIMER_REV_LIST"
+  FORWARD_PRIMERS=()
+  REVERSE_PRIMERS=()
+  for p in "${_tmpF[@]:-}"; do
+    p="${p//[[:space:]]/}"; [[ -n "$p" ]] && FORWARD_PRIMERS+=("$p")
+  done
+  for p in "${_tmpR[@]:-}"; do
+    p="${p//[[:space:]]/}"; [[ -n "$p" ]] && REVERSE_PRIMERS+=("$p")
+  done
+}
+
+# emit cutadapt -g/-a flags for all primers (anchored)
+cutadapt_primer_flags() {
+  local flags=()
+  for p in "${FORWARD_PRIMERS[@]}";  do flags+=( -g "^${p}" ); done
+  for p in "${REVERSE_PRIMERS[@]}";  do flags+=( -a "${p}\$" ); done
+  printf '%q ' "${flags[@]}"
+}
 
 # ----------------------------------------------------------
 # Function: ensure_channels
@@ -56,7 +88,6 @@ create_env_libsQC() {
     echo ">>> Checking if conda/mamba environment 'libsQC' exists..."
     if conda env list | grep -qE '^libsQC\s'; then
         echo ">>> Environment 'libsQC' already exists. Activating it..."
-        # shellcheck disable=SC1091
         source "$(conda info --base)/etc/profile.d/conda.sh"
         conda activate libsQC
         echo ">>> Environment 'libsQC' is now active."
@@ -297,6 +328,11 @@ quick_len_qual_overview() {
         NanoPlot --threads "${THREADS}" --fastq "$f" \
           --N50 --loglength --tsv_stats --raw \
           -o "$outdir" >/devnull 2>&1
+        NanoPlot --threads "${THREADS}" --fastq "$f" \
+          --N50 --loglength --tsv_stats --raw \
+          -o "$outdir" \
+          1>"$outdir/NanoPlot.stdout.log" \
+          2>"$outdir/NanoPlot.stderr.log"
         p_status=$?
         set -e
         if [ "$p_status" -ne 0 ]; then
@@ -326,20 +362,22 @@ run_pycoqc_optional() {
 # Function: primer_spotcheck
 # ----------------------------------------------------------
 primer_spotcheck() {
-    if [ -z "$PRIMER_FWD" ] && [ -z "$PRIMER_REV" ]; then
-        echo ">>> Primer spot-check skipped (set PRIMER_FWD/PRIMER_REV to enable)."
+    # support primer lists + error tolerance; save full reports
+    parse_primers
+    if [ ${#FORWARD_PRIMERS[@]} -eq 0 ] && [ ${#REVERSE_PRIMERS[@]} -eq 0 ]; then
+        echo ">>> Primer spot-check skipped (no primers provided)."
         return 0
     fi
     echo ">>> Primer/adapter residuals spot-check with cutadapt (no trimming)..."
-    mkdir -p results/primer_checks
+    mkdir -p "$PRIMER_CHECK_DIR"
     for f in "${FASTQ_FILES[@]}"; do
         base="${f##*/}"; base="${base%.gz}"
-        args=()
-        [ -n "$PRIMER_FWD" ] && args+=( -g "^${PRIMER_FWD}" )
-        [ -n "$PRIMER_REV" ] && args+=( -a "${PRIMER_REV}\$" )
-        cutadapt "${args[@]}" --report=minimal --no-trim -j "${THREADS}" \
-          -o /dev/null "$f" > "results/primer_checks/${base%.fastq}.cutadapt_report.txt"
-        echo "    cutadapt -> results/primer_checks/${base%.fastq}.cutadapt_report.txt"
+        # build flags for all primers
+        flags=$(cutadapt_primer_flags)
+        # run check with -e PRIMER_ERR and save full report
+        eval cutadapt $flags -e "$PRIMER_ERR" --no-trim -j "${THREADS}" \
+          -o /dev/null "$f" > "${PRIMER_CHECK_DIR}/${base%.fastq}.cutadapt_pre_check.txt"
+        echo "    cutadapt -> ${PRIMER_CHECK_DIR}/${base%.fastq}.cutadapt_pre_check.txt"
     done
     echo ">>> Review hit rates; high matches mean more trimming may be needed."
 }
@@ -350,10 +388,14 @@ primer_spotcheck() {
 filter_amplicons() {
   echo ">>> Global length + Q filtering (multi-marker libraries: ITS + 16S + LSU) ..."
   mkdir -p results/filtered
+  mkdir -p "$PRIMER_TRIM_DIR"
 
   local MEANQ="${MEANQ:-10}"          # minimum mean quality
   local LEN_MIN="${LEN_MIN:-200}"     # min read length to keep
   local LEN_MAX="${LEN_MAX:-3300}"    # max read length to keep (extended for LSU)
+
+  # parse primer lists once
+  parse_primers
 
   for f in "${FASTQ_FILES[@]}"; do
     base="${f##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
@@ -363,11 +405,13 @@ filter_amplicons() {
 
     # optional primer trim if sequences are known
     tmp="results/filtered/${base}.tmp.fastq.gz"
-    if [ -n "$PRIMER_FWD" ] || [ -n "$PRIMER_REV" ]; then
-      cutadapt -j "${THREADS}" \
-        $( [ -n "$PRIMER_FWD" ] && echo -g "^${PRIMER_FWD}" ) \
-        $( [ -n "$PRIMER_REV" ] && echo -a "${PRIMER_REV}\$" ) \
-        -o "$tmp" "$f" >/dev/null
+    if [ ${#FORWARD_PRIMERS[@]} -gt 0 ] || [ ${#REVERSE_PRIMERS[@]} -gt 0 ]; then
+      # add lists + -e PRIMER_ERR and save trim report
+      flags=$(cutadapt_primer_flags)
+      eval cutadapt $flags -j "${THREADS}" -e "$PRIMER_ERR" \
+        -o "$tmp" "$f" \
+        > "${PRIMER_TRIM_DIR}/${base}.cutadapt_trim_report.txt"
+      echo "    cutadapt trim -> ${PRIMER_TRIM_DIR}/${base}.cutadapt_trim_report.txt"
     else
       cp "$f" "$tmp"
     fi
@@ -428,11 +472,13 @@ make_fastq_summary() {
     echo ">>> Wrote results/summary/seqkit_stats.tsv"
 
     # If at least one combined NanoPlot exists (pre or post), we're good; else just skip creating.
-    if [ -f results/nanoplot/all_pre/NanoPlot-data.tsv ] || [ -f results/nanoplot/all_post/NanoPlot-data.tsv ]; then
+    if [ -f results/nanoplot/all_pre/NanoPlot-data.tsv ] || [ -f results/nanoplot/all_post/NanoPlot-data.tsv ] \
+      || [ -f results/nanoplot/all_pre/NanoPlot-data.txt ] || [ -f results/nanoplot/all_post/NanoPlot-data.txt ]; then
         echo ">>> Found combined NanoPlot per-read TSV (pre/post)."
     else
         echo ">>> No combined NanoPlot per-read TSV found (pre/post). Skipping generation."
     fi
+
 }
 
 # ----------------------------------------------------------
@@ -454,7 +500,12 @@ qc_flags_from_nanoplot() {
 
     shopt -s nullglob
     local found=false
-    for tsv in results/nanoplot/per_file/*/NanoPlot-data.tsv results/nanoplot/per_file/*/NanoPlot-data.tsv.gz; do
+    for tsv in \
+      results/nanoplot/per_file/*/NanoPlot-data.tsv \
+      results/nanoplot/per_file/*/NanoPlot-data.tsv.gz \
+      results/nanoplot/per_file/*/NanoPlot-data.txt \
+      results/nanoplot/per_file/*/NanoPlot-data.txt.gz; do
+
         [ -e "$tsv" ] || continue
         found=true
         base="$(basename "$(dirname "$tsv")")"
@@ -564,6 +615,49 @@ plot_fastq_length_boxplots() {
 }
 
 # ----------------------------------------------------------
+# verify primers after filtering and summarize to TSV
+# ----------------------------------------------------------
+verify_primer_removal() {
+  parse_primers
+  if [ ${#FORWARD_PRIMERS[@]} -eq 0 ] && [ ${#REVERSE_PRIMERS[@]} -eq 0 ]; then
+    echo ">>> verify_primer_removal: skipped (no primers provided)"
+    return 0
+  fi
+
+  echo ">>> Verifying primer removal on filtered FASTQs ..."
+  mkdir -p "$PRIMER_CHECK_DIR"
+  local out="${PRIMER_CHECK_DIR}/post_filter_summary.tsv"
+  echo -e "file\treads_processed\treads_with_adapters\tpct_with_adapters" > "$out"
+
+  shopt -s nullglob
+  local F=( results/filtered/*.fastq.gz results/filtered/*.fq.gz )
+  shopt -u nullglob
+  if [ ${#F[@]} -eq 0 ]; then
+    echo "!!! No filtered FASTQs found in results/filtered/"
+    return 1
+  fi
+
+  for ff in "${F[@]}"; do
+    b="${ff##*/}"; b="${b%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
+    flags=$(cutadapt_primer_flags)
+    rpt="${PRIMER_CHECK_DIR}/${b}.cutadapt_post_check.txt"
+    eval cutadapt $flags -e "$PRIMER_ERR" --no-trim -j "${THREADS}" -o /dev/null "$ff" > "$rpt"
+
+    reads_proc=$(awk -F': *' '/Total reads processed:/ {gsub(/,/, "", $2); print $2}' "$rpt")
+    reads_adp=$(awk -F': *' '/Reads with adapters:/ {gsub(/,/, "", $2); print $2}' "$rpt")
+    pct_adp=$(awk -F'[(%)]' '/Reads with adapters:/ {gsub(/ /, "", $2); print $2}' "$rpt")
+    [ -z "$reads_proc" ] && reads_proc=NA
+    [ -z "$reads_adp" ] && reads_adp=NA
+    [ -z "$pct_adp" ] && pct_adp=NA
+
+    echo -e "${b}\t${reads_proc}\t${reads_adp}\t${pct_adp}" >> "$out"
+  done
+
+  echo ">>> Post-filter primer check summary -> ${out}"
+  echo ">>> Individual reports -> ${PRIMER_CHECK_DIR}/*.cutadapt_post_check.txt"
+}
+
+# ----------------------------------------------------------
 # Function: log_run_report
 #   - Records runtime, threads, system info, and per-function timing
 #   - Saves a summary text file to logs/run_report_<timestamp>.txt
@@ -661,6 +755,8 @@ time_function run_multiqc
 
 # Nanopore-specific QC (pre-filter) -----------------------------------
 time_function 'quick_len_qual_overview pre'
+# (optional) If you want a pre-filter primer presence check, uncomment:
+time_function primer_spotcheck   # (optional hook, commented by default)
 
 # Summaries and QC flags --------------------------------------------------
 time_function make_fastq_summary
@@ -669,6 +765,7 @@ time_function 'plot_fastq_length_boxplots pre'
 
 # Filtering step ----------------------------------------------------------
 time_function filter_amplicons
+time_function verify_primer_removal 
 time_function re_qc_filtered
 
 #Final report ------------------------------------------------------------
