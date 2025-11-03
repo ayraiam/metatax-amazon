@@ -87,6 +87,27 @@ EMU_CPUS="${EMU_CPUS:-$CPUS}"
 EMU_MEM="${EMU_MEM:-$MEM}"
 
 mkdir -p logs
+
+# write default multi-primer lists and expose as files to QC >>>
+mkdir -p metadata
+PRIMERS_FWD_FILE="metadata/primers_fwd.list"
+PRIMERS_REV_FILE="metadata/primers_rev.list"
+cat > "$PRIMERS_FWD_FILE" <<'EOF'
+TTCCGGTTGATCCTGCCGGA
+TCCGTAGGTGAACCTGCGG
+AGAGTTTGATCMTGGCTCAG
+TACTACCACCAAGATCT
+EOF
+cat > "$PRIMERS_REV_FILE" <<'EOF'
+TACGGWTACCTTGTTACGACTT
+TCCTCCGCTTATTGATATGC
+GGTTACCTTGTTACGACTT
+ACCCGCTGAACTTAAGC
+EOF
+# If single primers provided via CLI, append them as well (uppercased).
+if [[ -n "$PRIMER_FWD" ]]; then echo "$PRIMER_FWD" | tr '[:lower:]' '[:upper:]' >> "$PRIMERS_FWD_FILE"; fi
+if [[ -n "$PRIMER_REV" ]]; then echo "$PRIMER_REV" | tr '[:lower:]' '[:upper:]' >> "$PRIMERS_REV_FILE"; fi
+
 TS=$(date +%Y%m%d_%H%M%S)
 OUT_LOG="logs/run_${TS}.out"
 ERR_LOG="logs/run_${TS}.err"
@@ -120,7 +141,7 @@ if [[ "$RUN_LIBSQC" -eq 1 ]]; then
     --mem="$MEM" \
     --time="$TIME" \
     --chdir="$WDIR" \
-    --export=ALL,THREADS="$CPUS",PRIMER_FWD="$PRIMER_FWD",PRIMER_REV="$PRIMER_REV",SEQ_SUMMARY="$SEQ_SUMMARY" \
+    --export=ALL,THREADS="$CPUS",PRIMER_FWD="$PRIMER_FWD",PRIMER_REV="$PRIMER_REV",SEQ_SUMMARY="$SEQ_SUMMARY",PRIMERS_FWD_FILE="$PRIMERS_FWD_FILE",PRIMERS_REV_FILE="$PRIMERS_REV_FILE" \  # <<< CHANGED (added PRIMERS_*_FILE)
     /bin/bash workflow/run_libsQC.sh \
     1>"$OUT_LOG" \
     2>"$ERR_LOG"
