@@ -447,35 +447,61 @@ qc_flags_from_nanoplot() {
 }
 
 plot_fastq_length_boxplots() {
-    local LABEL="${1:-pre}"
-    echo ">>> Preparing read-length boxplots (${LABEL}) ..."
-    [ -d "${RESULTS}/lengths" ] || mkdir -p "${RESULTS}/lengths"
+    local LABEL="${1:-pre}"   # "pre" (default) or "post"
+    local OUT_DIR="${2:-results/lengths}"   #allow custom output dir per group
+    echo ">>> Preparing read-length boxplots for FASTQs (${LABEL}) -> ${OUT_DIR} ..."
+    [ -d "${OUT_DIR}" ] || mkdir -p "${OUT_DIR}"
 
-    if [ ${#FASTQ_FILES[@]} -eq 0 ]; then echo "!!! No FASTQs"; return 1; fi
+    if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
+        echo "!!! No FASTQ files available in FASTQ_FILES"
+        return 1
+    fi
 
-    local SAMPLE_N="${SAMPLE_N:-0}"
+    SAMPLE_N="${SAMPLE_N:-0}"
+
+    echo ">>> Extracting read lengths (this may take a bit for large files)..."
     for f in "${FASTQ_FILES[@]}"; do
-        base="${f##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
+        base="${f##*/}"
+        base="${base%.gz}"
+        base="${base%.fastq}"
+        base="${base%.fq}"
+
         if [ "$SAMPLE_N" -gt 0 ]; then
-          seqkit sample -n "$SAMPLE_N" "$f" | seqkit fx2tab -n -l - | awk -F'\t' -v OFS='\t' -v s="$base" '{print s,$NF}' > "${RESULTS}/lengths/${base}.len.tsv"
+          seqkit sample -n "$SAMPLE_N" "$f" \
+            | seqkit fx2tab -n -l - \
+            | awk -F'\t' -v OFS='\t' -v s="$base" '{print s,$NF}' \
+            > "${OUT_DIR}/${base}.len.tsv"
         else
-          seqkit fx2tab -n -l "$f" | awk -F'\t' -v OFS='\t' -v s="$base" '{print s,$NF}' > "${RESULTS}/lengths/${base}.len.tsv"
+          seqkit fx2tab -n -l "$f" \
+            | awk -F'\t' -v OFS='\t' -v s="$base" '{print s,$NF}' \
+            > "${OUT_DIR}/${base}.len.tsv"
         fi
+        echo "    wrote ${OUT_DIR}/${base}.len.tsv"
     done
 
-    { echo -e "sample\tlength"; cat "${RESULTS}/lengths/"*.len.tsv; } > "${RESULTS}/lengths/all_lengths.tsv"
-    rm -f "${RESULTS}/lengths/"*.len.tsv
+    {
+      echo -e "sample\tlength"
+      cat "${OUT_DIR}"/*.len.tsv
+    } > "${OUT_DIR}/all_lengths.tsv"
+
+    echo ">>> Combined table: ${OUT_DIR}/all_lengths.tsv"
+    rm -f "${OUT_DIR}"/*.len.tsv
+    echo ">>> Removed temporary per-file .len.tsv files; only all_lengths.tsv retained."
 
     if [ ! -f workflow/plot_fastq_lengths.R ]; then
         echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
         return 1
     fi
 
-    Rscript workflow/plot_fastq_lengths.R
+    echo ">>> Running R to generate the boxplot figure..."
+    Rscript workflow/plot_fastq_lengths.R "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}"
 
-    cp "${RESULTS}/lengths/all_lengths.tsv" "${RESULTS}/lengths/all_lengths_${LABEL}.tsv" || true
-    [ -f "${RESULTS}/lengths/read_length_boxplots.png" ] && mv "${RESULTS}/lengths/read_length_boxplots.png" "${RESULTS}/lengths/read_length_boxplots_${LABEL}.png"
-    [ -f "${RESULTS}/lengths/read_length_boxplots.pdf" ] && mv "${RESULTS}/lengths/read_length_boxplots.pdf" "${RESULTS}/lengths/read_length_boxplots_${LABEL}.pdf"
+    # Keep phase-specific copies
+    cp "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}/all_lengths_${LABEL}.tsv" || true
+    [ -f "${OUT_DIR}/read_length_boxplots.png" ] && mv "${OUT_DIR}/read_length_boxplots.png" "${OUT_DIR}/read_length_boxplots_${LABEL}.png"
+    [ -f "${OUT_DIR}/read_length_boxplots.pdf" ] && mv "${OUT_DIR}/read_length_boxplots.pdf" "${OUT_DIR}/read_length_boxplots_${LABEL}.pdf"
+
+    echo ">>> Plots saved to ${OUT_DIR}/read_length_boxplots_${LABEL}.png and .pdf"
 }
 
 # verify primers after filtering and summarize to TSV
@@ -510,6 +536,29 @@ verify_primer_removal() {
     echo -e "${b}\t${reads_proc}\t${reads_adp}\t${pct_adp}" >> "$out"
   done
   echo ">>> Post-filter primer check summary -> ${out}"
+}
+
+# helper to aggregate per-group length tables to the legacy top-level path
+aggregate_group_lengths() {
+  echo ">>> Aggregating per-group length tables to results/lengths/all_lengths.tsv ..."
+  mkdir -p results/lengths
+  local out="results/lengths/all_lengths.tsv"
+  echo -e "sample\tlength" > "$out"
+
+  # collect from each group if present
+  for g in Archaeae Ascomic Bac Basid Unknown; do
+    local t="results/${g}/lengths/all_lengths.tsv"
+    if [ -s "$t" ]; then
+      # skip header (NR>1) and prefix sample names with the group for clarity
+      awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "$t" >> "$out"
+    fi
+  done
+
+  if [ $(wc -l < "$out") -le 1 ]; then
+    echo "!!! No group length tables found — aggregated file is empty."
+    return 1
+  fi
+  echo ">>> Wrote results/lengths/all_lengths.tsv"
 }
 
 # ----------------------------------------------------------
@@ -629,7 +678,7 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
   # Summaries and QC flags
   time_function make_fastq_summary
   time_function qc_flags_from_nanoplot
-  time_function 'plot_fastq_length_boxplots pre'
+  time_function "plot_fastq_length_boxplots pre results/${GROUP}/lengths"
 
   # Filtering step (trim primers + NanoFilt) and verify
   time_function filter_amplicons
@@ -638,4 +687,5 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
 done
 
 #Final report
+aggregate_group_lengths || true
 log_run_report
