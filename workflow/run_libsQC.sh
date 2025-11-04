@@ -33,6 +33,15 @@ PRIMER_REV_LIST="${PRIMER_REV_LIST:-$PRIMER_REV}"   # CSV or single value
 PRIMER_CHECK_DIR="results/primer_checks"
 PRIMER_TRIM_DIR="results/primer_trimming"
 
+# If runall.sh exported primer list files, read them, uppercase, and
+# convert to CSV so parse_primers() below can consume them.
+if [[ -n "${PRIMERS_FWD_FILE:-}" && -s "${PRIMERS_FWD_FILE}" ]]; then
+  PRIMER_FWD_LIST="$(awk 'NF{gsub(/[ \t\r]/,""); print toupper($0)}' "${PRIMERS_FWD_FILE}" | paste -sd, -)"
+fi
+if [[ -n "${PRIMERS_REV_FILE:-}" && -s "${PRIMERS_REV_FILE}" ]]; then
+  PRIMER_REV_LIST="$(awk 'NF{gsub(/[ \t\r]/,""); print toupper($0)}' "${PRIMERS_REV_FILE}" | paste -sd, -)"
+fi
+
 # internal arrays built from lists (parsed later)
 FORWARD_PRIMERS=()
 REVERSE_PRIMERS=()
@@ -327,9 +336,6 @@ quick_len_qual_overview() {
         set +e
         NanoPlot --threads "${THREADS}" --fastq "$f" \
           --N50 --loglength --tsv_stats --raw \
-          -o "$outdir" >/devnull 2>&1
-        NanoPlot --threads "${THREADS}" --fastq "$f" \
-          --N50 --loglength --tsv_stats --raw \
           -o "$outdir" \
           1>"$outdir/NanoPlot.stdout.log" \
           2>"$outdir/NanoPlot.stderr.log"
@@ -338,7 +344,7 @@ quick_len_qual_overview() {
         if [ "$p_status" -ne 0 ]; then
             echo "!!! NanoPlot raw FAILED for $b (exit $p_status) — continuing."
         else
-            echo "    NanoPlot raw -> $outdir/NanoPlot-data.tsv(.gz)"
+            echo "    NanoPlot raw -> $outdir/NanoPlot-data.tsv(.gz or .txt)"
         fi
     done
     echo ">>> Per-file NanoPlot raw TSVs ready under results/nanoplot/per_file/"
@@ -545,9 +551,8 @@ qc_flags_from_nanoplot() {
     if [ "$found" = false ]; then
         echo "!!! No per-file NanoPlot raw TSVs found. Did quick_len_qual_overview run?"
         rm -f results/summary/qc_flags.tsv
-        return 1
+        return 0
     fi
-
     echo ">>> Wrote simplified QC summary: results/summary/qc_flags.tsv"
 }
 
@@ -765,7 +770,7 @@ time_function 'plot_fastq_length_boxplots pre'
 
 # Filtering step ----------------------------------------------------------
 time_function filter_amplicons
-time_function verify_primer_removal 
+time_function verify_primer_removal
 time_function re_qc_filtered
 
 #Final report ------------------------------------------------------------
