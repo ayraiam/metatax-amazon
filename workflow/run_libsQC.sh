@@ -392,7 +392,7 @@ re_qc_filtered() {
   quick_len_qual_overview post
   make_fastq_summary
   qc_flags_from_nanoplot
-  plot_fastq_length_boxplots post
+  plot_fastq_length_boxplots post "${RESULTS}/lengths"
 }
 
 make_fastq_summary() {
@@ -540,25 +540,40 @@ verify_primer_removal() {
 
 # helper to aggregate per-group length tables to the legacy top-level path
 aggregate_group_lengths() {
-  echo ">>> Aggregating per-group length tables to results/lengths/all_lengths.tsv ..."
+  echo ">>> Aggregating per-group length tables into legacy combined files ..."
   mkdir -p results/lengths
-  local out="results/lengths/all_lengths.tsv"
-  echo -e "sample\tlength" > "$out"
 
-  # collect from each group if present
-  for g in Archaeae Ascomic Bac Basid Unknown; do
-    local t="results/${g}/lengths/all_lengths.tsv"
-    if [ -s "$t" ]; then
-      # skip header (NR>1) and prefix sample names with the group for clarity
-      awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "$t" >> "$out"
+  #build BOTH pre and post combined TSVs from results/groups/<GROUP>/lengths
+  local out_pre="results/lengths/all_lengths.tsv"
+  local out_post="results/lengths/all_lengths_post.tsv"
+  echo -e "sample\tlength" > "$out_pre"
+  echo -e "sample\tlength" > "$out_post"
+
+  for g in Archaea Ascomic Bac Basid Unknown; do
+    local d="results/groups/${g}/lengths"
+
+    # pre
+    if [ -s "${d}/all_lengths.tsv" ]; then
+      awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths.tsv" >> "$out_pre"
+    fi
+
+    # post
+    if [ -s "${d}/all_lengths_post.tsv" ]; then
+      awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths_post.tsv" >> "$out_post"
     fi
   done
 
-  if [ $(wc -l < "$out") -le 1 ]; then
-    echo "!!! No group length tables found — aggregated file is empty."
-    return 1
+  if [ $(wc -l < "$out_pre") -le 1 ]; then
+    echo "!!! No group PRE length tables found — results/lengths/all_lengths.tsv is empty."
+  else
+    echo ">>> Wrote results/lengths/all_lengths.tsv"
   fi
-  echo ">>> Wrote results/lengths/all_lengths.tsv"
+
+  if [ $(wc -l < "$out_post") -le 1 ]; then
+    echo "!!! No group POST length tables found — results/lengths/all_lengths_post.tsv is empty."
+  else
+    echo ">>> Wrote results/lengths/all_lengths_post.tsv"
+  fi
 }
 
 # ----------------------------------------------------------
@@ -678,7 +693,7 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
   # Summaries and QC flags
   time_function make_fastq_summary
   time_function qc_flags_from_nanoplot
-  time_function "plot_fastq_length_boxplots pre results/${GROUP}/lengths"
+  time_function "plot_fastq_length_boxplots pre results/groups/${GROUP}/lengths"
 
   # Filtering step (trim primers + NanoFilt) and verify
   time_function filter_amplicons
