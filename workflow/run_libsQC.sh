@@ -447,8 +447,8 @@ qc_flags_from_nanoplot() {
 }
 
 plot_fastq_length_boxplots() {
-    local LABEL="${1:-pre}"   # "pre" (default) or "post"
-    local OUT_DIR="${2:-results/lengths}"   #allow custom output dir per group
+    local LABEL="${1:-pre}"
+    local OUT_DIR="${2:-results/lengths}"
     echo ">>> Preparing read-length boxplots for FASTQs (${LABEL}) -> ${OUT_DIR} ..."
     [ -d "${OUT_DIR}" ] || mkdir -p "${OUT_DIR}"
 
@@ -488,20 +488,17 @@ plot_fastq_length_boxplots() {
     rm -f "${OUT_DIR}"/*.len.tsv
     echo ">>> Removed temporary per-file .len.tsv files; only all_lengths.tsv retained."
 
-    if [ ! -f workflow/plot_fastq_lengths.R ]; then
-        echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
-        return 1
+    if [ "${OUT_DIR}" = "results/lengths" ]; then
+      if [ ! -f workflow/plot_fastq_lengths.R ]; then
+          echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
+          return 1
+      fi
+      echo ">>> Running R to generate the boxplot figure..."
+      Rscript workflow/plot_fastq_lengths.R
+      echo ">>> Plots saved to results/lengths/read_length_boxplots.png and .pdf"
+    else
+      echo ">>> Skipping R plotting for per-group OUT_DIR=${OUT_DIR}; TSV built."
     fi
-
-    echo ">>> Running R to generate the boxplot figure..."
-    Rscript workflow/plot_fastq_lengths.R "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}"
-
-    # Keep phase-specific copies
-    cp "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}/all_lengths_${LABEL}.tsv" || true
-    [ -f "${OUT_DIR}/read_length_boxplots.png" ] && mv "${OUT_DIR}/read_length_boxplots.png" "${OUT_DIR}/read_length_boxplots_${LABEL}.png"
-    [ -f "${OUT_DIR}/read_length_boxplots.pdf" ] && mv "${OUT_DIR}/read_length_boxplots.pdf" "${OUT_DIR}/read_length_boxplots_${LABEL}.pdf"
-
-    echo ">>> Plots saved to ${OUT_DIR}/read_length_boxplots_${LABEL}.png and .pdf"
 }
 
 # verify primers after filtering and summarize to TSV
@@ -552,12 +549,12 @@ aggregate_group_lengths() {
   for g in Archaea Ascomic Bac Basid Unknown; do
     local d="results/groups/${g}/lengths"
 
-    # pre
+    # PRE
     if [ -s "${d}/all_lengths.tsv" ]; then
       awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths.tsv" >> "$out_pre"
     fi
 
-    # post
+    # POST
     if [ -s "${d}/all_lengths_post.tsv" ]; then
       awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths_post.tsv" >> "$out_post"
     fi
@@ -573,6 +570,43 @@ aggregate_group_lengths() {
     echo "!!! No group POST length tables found — results/lengths/all_lengths_post.tsv is empty."
   else
     echo ">>> Wrote results/lengths/all_lengths_post.tsv"
+  fi
+}
+
+#helper to render combined PRE and POST plots after aggregation
+render_combined_plots() {
+  if [ ! -f workflow/plot_fastq_lengths.R ]; then
+    echo "!!! Missing workflow/plot_fastq_lengths.R — cannot render combined plots."
+    return 1
+  fi
+  mkdir -p results/lengths
+
+  # PRE
+  if [ -s results/lengths/all_lengths.tsv ]; then
+    echo ">>> Rendering combined PRE plot ..."
+    Rscript workflow/plot_fastq_lengths.R
+    mv -f results/lengths/read_length_boxplots.png results/lengths/read_length_boxplots_pre.png || true
+    mv -f results/lengths/read_length_boxplots.pdf results/lengths/read_length_boxplots_pre.pdf || true
+  else
+    echo ">>> Skipping PRE plot (no results/lengths/all_lengths.tsv)"
+  fi
+
+  # POST
+  if [ -s results/lengths/all_lengths_post.tsv ]; then
+    echo ">>> Rendering combined POST plot ..."
+    cp -f results/lengths/all_lengths_post.tsv results/lengths/all_lengths.tsv
+    Rscript workflow/plot_fastq_lengths.R
+    mv -f results/lengths/read_length_boxplots.png results/lengths/read_length_boxplots_post.png || true
+    mv -f results/lengths/read_length_boxplots.pdf results/lengths/read_length_boxplots_post.pdf || true
+    # restore PRE table if it existed (harmless if absent)
+    if [ -s results/lengths/all_lengths_pre.tsv ]; then
+      cp -f results/lengths/all_lengths_pre.tsv results/lengths/all_lengths.tsv || true
+    else
+      # or restore the aggregated PRE file if it's still there
+      cp -f results/lengths/all_lengths_post.tsv results/lengths/all_lengths.tsv >/dev/null 2>&1 || true
+    fi
+  else
+    echo ">>> Skipping POST plot (no results/lengths/all_lengths_post.tsv)"
   fi
 }
 
@@ -703,4 +737,5 @@ done
 
 #Final report
 aggregate_group_lengths || true
+render_combined_plots   || true
 log_run_report
