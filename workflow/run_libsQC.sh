@@ -450,8 +450,8 @@ plot_fastq_length_boxplots() {
     [ -d "${OUT_DIR}" ] || mkdir -p "${OUT_DIR}"
 
     if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
-        echo "!!! No FASTQ files available in FASTQ_FILES"
-        return 1
+        echo "!!! No FASTQ files available in FASTQ_FILES — skipping ${LABEL} plot for OUT_DIR=${OUT_DIR}"
+        return 0
     fi
 
     SAMPLE_N="${SAMPLE_N:-0}"
@@ -462,7 +462,6 @@ plot_fastq_length_boxplots() {
         base="${base%.gz}"
         base="${base%.fastq}"
         base="${base%.fq}"
-
         if [ "$SAMPLE_N" -gt 0 ]; then
           seqkit sample -n "$SAMPLE_N" "$f" \
             | seqkit fx2tab -n -l - \
@@ -485,19 +484,36 @@ plot_fastq_length_boxplots() {
     rm -f "${OUT_DIR}"/*.len.tsv
     echo ">>> Removed temporary per-file .len.tsv files; only all_lengths.tsv retained."
 
-		if [ ! -f workflow/plot_fastq_lengths.R ]; then
-        echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
-        return 1
+    if [ ! -f workflow/plot_fastq_lengths.R ]; then
+        echo "!!! Missing workflow/plot_fastq_lengths.R — skipping plot."
+        return 0
     fi
+
     echo ">>> Running R to generate the boxplot figure for ${LABEL} in ${OUT_DIR} ..."
+    set +e
     Rscript workflow/plot_fastq_lengths.R "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}" "${LABEL}"
+    rstat=$?
+    set -e
+    if [ $rstat -ne 0 ]; then
+      echo "!!! R failed for OUT_DIR=${OUT_DIR}, LABEL=${LABEL} (exit ${rstat}). Listing directory for clues:"
+      ls -lh "${OUT_DIR}" || true
+      return 0
+    fi
 
-    echo ">>> Plots saved to ${OUT_DIR}/read_length_boxplots_${LABEL}.png and ${OUT_DIR}/read_length_boxplots_${LABEL}.pdf"
-
-    # always copy the main table to a phase-specific filename (PRE/POST)
-		if [ -f "${OUT_DIR}/all_lengths.tsv" ]; then
+    # suffix copy (for downstream aggregation if you want it)
+    if [ -f "${OUT_DIR}/all_lengths.tsv" ]; then
       cp "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}/all_lengths_${LABEL}.tsv"
       echo ">>> Wrote ${OUT_DIR}/all_lengths_${LABEL}.tsv"
+    fi
+
+    # verify files are really there, then print exact paths
+    if [ -f "${OUT_DIR}/read_length_boxplots_${LABEL}.png" ]; then
+      echo ">>> Plots saved:"
+      echo "    ${OUT_DIR}/read_length_boxplots_${LABEL}.png"
+      echo "    ${OUT_DIR}/read_length_boxplots_${LABEL}.pdf"
+    else
+      echo "!!! Plot files not found in ${OUT_DIR} after R ran. Contents:"
+      ls -lh "${OUT_DIR}" || true
     fi
 }
 
@@ -708,11 +724,6 @@ single_function_runner() {
     fi
   done
 
-  # Optionally rebuild combined tables/plots if we just ran plotting
-  if [[ "${fn}" == "plot_fastq_length_boxplots" ]]; then
-    aggregate_group_lengths || true
-    render_combined_plots   || true
-  fi
 }
 
 # ==========================================================
