@@ -1,6 +1,15 @@
+# make the script accept infile, outdir, and label
+args    <- commandArgs(trailingOnly = TRUE)
+infile  <- if (length(args) >= 1) args[1] else "results/lengths/all_lengths.tsv"
+outdir  <- if (length(args) >= 2) args[2] else "results/lengths"
+label   <- if (length(args) >= 3) args[3] else ""
+
+suffix  <- if (nzchar(label)) paste0("_", label) else ""
+png_out <- file.path(outdir, paste0("read_length_boxplots", suffix, ".png"))
+pdf_out <- file.path(outdir, paste0("read_length_boxplots", suffix, ".pdf"))
+
 make_boxplot <- function(){
   
-  # workflow/plot_fastq_lengths.R
   suppressPackageStartupMessages({
     if (!requireNamespace("data.table", quietly = TRUE)) {
       stop("Package 'data.table' not found. Install it in the libsQC env.")
@@ -10,19 +19,15 @@ make_boxplot <- function(){
     }
   })
   
-  infile  <- "results/lengths/all_lengths.tsv"
-  png_out <- "results/lengths/read_length_boxplots.png"
-  pdf_out <- "results/lengths/read_length_boxplots.pdf"
-  
+  ### >>> CHANGED: use arg-provided infile/outdir
   if (!file.exists(infile)) {
     stop(sprintf("Input not found: %s (did you run plot_fastq_length_boxplots to build it?)", infile))
   }
   
-  # Expect two columns: sample, length
   dt <- read.table(infile, header = TRUE, sep = "\t")
   dt$length <- as.integer(dt$length)
   
-  # derive a 'group' column if sample looks like "Group/Sample"
+  # If samples are like "Group/Sample", split; otherwise single group is fine
   if (any(grepl("/", dt$sample, fixed = TRUE))) {
     parts <- strsplit(as.character(dt$sample), "/", fixed = TRUE)
     dt$group  <- vapply(parts, `[`, character(1), 1)
@@ -32,12 +37,10 @@ make_boxplot <- function(){
     dt$group <- factor("All")
   }
   
-  # reorder by median (optional)
   meds <- aggregate(length ~ sample, dt, function(x) stats::median(x, na.rm = TRUE))
   ord  <- meds[order(meds$length), "sample"]
   dt$sample <- factor(dt$sample, levels = ord)
   
-  # choose a zoom cap
   y_cap <- unname(quantile(dt$length, 0.99, na.rm = TRUE))
   
   p <- ggplot2::ggplot(dt, ggplot2::aes(sample, length, group = sample)) +
@@ -51,18 +54,18 @@ make_boxplot <- function(){
     ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
                    panel.grid.minor = ggplot2::element_blank())
   
-  #facet by group when available
+  # With per-group runs, there will typically be one facet only; harmless to keep
   if (length(levels(dt$group)) > 1) {
     p <- p + ggplot2::facet_wrap(~ group, scales = "free_x", ncol = 1)
   }
   
+  # cap width to avoid the 50-inch error (and allow override)
   n <- length(levels(dt$sample))
-  w <- max(12, n * 0.25)
-  ggplot2::ggsave(png_out, p, width = w, height = 6, dpi = 200)
-  ggplot2::ggsave(pdf_out,  p, width = w, height = 6)
+  w <- min(40, max(8, n * 0.25))  # 8–40 inches
+  ggplot2::ggsave(png_out, p, width = w, height = 6, dpi = 200, limitsize = FALSE)
+  ggplot2::ggsave(pdf_out,  p, width = w, height = 6, limitsize = FALSE)
   
   message(sprintf("Wrote:\n  %s\n  %s", png_out, pdf_out))
 }
 
-# Calling the function
 make_boxplot()
