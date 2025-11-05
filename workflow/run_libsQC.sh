@@ -499,6 +499,11 @@ plot_fastq_length_boxplots() {
     else
       echo ">>> Skipping R plotting for per-group OUT_DIR=${OUT_DIR}; TSV built."
     fi
+    # always copy the main table to a phase-specific filename (PRE/POST)
+    if [ -f "${OUT_DIR}/all_lengths.tsv" ]; then
+      cp "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}/all_lengths_${LABEL}.tsv"
+      echo ">>> Wrote ${OUT_DIR}/all_lengths_${LABEL}.tsv"
+    fi
 }
 
 # verify primers after filtering and summarize to TSV
@@ -546,30 +551,37 @@ aggregate_group_lengths() {
   echo -e "sample\tlength" > "$out_pre"
   echo -e "sample\tlength" > "$out_post"
 
+  local found_pre=0
+  local found_post=0
+
   for g in Archaea Ascomic Bac Basid Unknown; do
     local d="results/groups/${g}/lengths"
 
     # PRE
     if [ -s "${d}/all_lengths.tsv" ]; then
       awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths.tsv" >> "$out_pre"
+      echo "    PRE: included ${d}/all_lengths.tsv"
+      found_pre=1
     fi
 
     # POST
     if [ -s "${d}/all_lengths_post.tsv" ]; then
       awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths_post.tsv" >> "$out_post"
+      echo "    POST: included ${d}/all_lengths_post.tsv"
+      found_post=1
     fi
   done
 
-  if [ $(wc -l < "$out_pre") -le 1 ]; then
-    echo "!!! No group PRE length tables found — results/lengths/all_lengths.tsv is empty."
-  else
+  if [ "$found_pre" -eq 1 ]; then
     echo ">>> Wrote results/lengths/all_lengths.tsv"
+  else
+    echo "!!! No group PRE length tables found — results/lengths/all_lengths.tsv is empty."
   fi
 
-  if [ $(wc -l < "$out_post") -le 1 ]; then
-    echo "!!! No group POST length tables found — results/lengths/all_lengths_post.tsv is empty."
-  else
+  if [ "$found_post" -eq 1 ]; then
     echo ">>> Wrote results/lengths/all_lengths_post.tsv"
+  else
+    echo "!!! No group POST length tables found — results/lengths/all_lengths_post.tsv is empty."
   fi
 }
 
