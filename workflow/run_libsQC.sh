@@ -686,7 +686,7 @@ time_function export_env
 # Input discovery
 time_function gather_fastq_files
 # only process first 3 files
-time_function limit_to_three_fastqs
+#time_function limit_to_three_fastqs
 
 # 3) CLASSIFY reads into groups BEFORE any trimming/QC
 # demultiplex by primer pairs
