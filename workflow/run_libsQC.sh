@@ -260,9 +260,6 @@ demux_by_primers() {
   echo ">>> Demultiplexing complete. See ${groups_root}/*/data/"
 }
 
-# ----------------------------------------------------------
-# All QC functions below: swap fixed "results/..." to "${RESULTS}/..."
-# ----------------------------------------------------------
 run_fastqc_all() {
     echo ">>> Running FastQC ..."
     mkdir -p "${RESULTS}/qc_raw"
@@ -488,19 +485,17 @@ plot_fastq_length_boxplots() {
     rm -f "${OUT_DIR}"/*.len.tsv
     echo ">>> Removed temporary per-file .len.tsv files; only all_lengths.tsv retained."
 
-    if [ "${OUT_DIR}" = "results/lengths" ]; then
-      if [ ! -f workflow/plot_fastq_lengths.R ]; then
-          echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
-          return 1
-      fi
-      echo ">>> Running R to generate the boxplot figure..."
-      Rscript workflow/plot_fastq_lengths.R
-      echo ">>> Plots saved to results/lengths/read_length_boxplots.png and .pdf"
-    else
-      echo ">>> Skipping R plotting for per-group OUT_DIR=${OUT_DIR}; TSV built."
+		if [ ! -f workflow/plot_fastq_lengths.R ]; then
+        echo "!!! Missing workflow/plot_fastq_lengths.R — please create it."
+        return 1
     fi
+    echo ">>> Running R to generate the boxplot figure for ${LABEL} in ${OUT_DIR} ..."
+    Rscript workflow/plot_fastq_lengths.R "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}" "${LABEL}"
+
+    echo ">>> Plots saved to ${OUT_DIR}/read_length_boxplots_${LABEL}.png and ${OUT_DIR}/read_length_boxplots_${LABEL}.pdf"
+
     # always copy the main table to a phase-specific filename (PRE/POST)
-    if [ -f "${OUT_DIR}/all_lengths.tsv" ]; then
+		if [ -f "${OUT_DIR}/all_lengths.tsv" ]; then
       cp "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}/all_lengths_${LABEL}.tsv"
       echo ">>> Wrote ${OUT_DIR}/all_lengths_${LABEL}.tsv"
     fi
@@ -670,6 +665,56 @@ time_function() {
     return $status
 }
 
+#single-function runner (optional mode)
+single_function_runner() {
+  local fn="$1"                # name of the bash function to call
+  local label="${LABEL:-pre}"  # e.g., pre or post for plotting
+  echo ">>> SINGLE-FUNCTION MODE: ${fn}  (LABEL=${label})"
+
+  # we assume demultiplexing already done; operate on existing groups
+  for GROUP in Archaea Ascomic Bac Basid Unknown; do
+    echo
+    echo "================= GROUP: ${GROUP} (ONLY_FN=${fn}) ================="
+    RESULTS="results/groups/${GROUP}"
+    PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
+    PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
+
+    # pick inputs per function/label
+    shopt -s nullglob
+    if [[ "${fn}" == "plot_fastq_length_boxplots" ]]; then
+      # For plotting: PRE uses raw group data; POST uses filtered
+      if [[ "${label}" == "post" ]]; then
+        FASTQ_FILES=( "${RESULTS}/filtered/"*.fastq.gz )
+      else
+        FASTQ_FILES=( "${RESULTS}/data/"*.fastq.gz )
+      fi
+    else
+      # generic: operate on raw group data
+      FASTQ_FILES=( "${RESULTS}/data/"*.fastq.gz )
+    fi
+    shopt -u nullglob
+
+    if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
+      echo ">>> No FASTQs for ${GROUP} matching this mode; skipping."
+      continue
+    fi
+
+    # group-scoped out dir for plotting
+    if [[ "${fn}" == "plot_fastq_length_boxplots" ]]; then
+      time_function "${fn} ${label} results/groups/${GROUP}/lengths"
+    else
+      # call the function without extra args
+      time_function "${fn}"
+    fi
+  done
+
+  # Optionally rebuild combined tables/plots if we just ran plotting
+  if [[ "${fn}" == "plot_fastq_length_boxplots" ]]; then
+    aggregate_group_lengths || true
+    render_combined_plots   || true
+  fi
+}
+
 # ==========================================================
 # Calling the functions (QC pipeline main flow)
 # ==========================================================
@@ -677,6 +722,18 @@ time_function() {
 START_TIME=$(date +%s)
 [ -d logs ] || mkdir -p logs
 : > logs/.timing.tsv
+
+#if ONLY_FN is set, run just that across all groups and exit
+if [[ -n "${ONLY_FN:-}" ]]; then
+  # If your function needs the conda env, you can still initialize it:
+  time_function create_env_libsQC
+  time_function check_versions
+  time_function export_env
+  # We do NOT demux again; we assume groups already exist.
+  single_function_runner "${ONLY_FN}"
+  log_run_report
+  exit 0
+fi
 
 # Environment setup
 time_function create_env_libsQC
@@ -748,6 +805,4 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
 done
 
 #Final report
-aggregate_group_lengths || true
-render_combined_plots   || true
 log_run_report
