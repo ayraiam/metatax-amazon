@@ -183,7 +183,7 @@ _resolve_assignments_with_stats() {
           if (mlen==0 && match(line, /overlap=([0-9]+)/, m3)) { mlen=m3[1]+0 }
           print id, G, err, mlen
         }
-      ' "$info" >> "$tmp"
+      ' "$info" >> "${tmp}"
     done
   done
 
@@ -215,17 +215,15 @@ _resolve_assignments_with_stats() {
     }
     END{
       for(id in be){
-        if (tie[id]==1) {
-          # leave unassigned => will become Unknown later
-          next
-        } else {
+        if (tie[id]==0) {
           print id, bg[id], be[id], bm[id];
         }
+        # if tie[id]==1 we print nothing (unassigned -> Unknown)
       }
     }
   ' "$tmp" | sort -k1,1 >> "$tsv"
 
-  # write finals for groups only; Unknown will be computed as complement later
+  # write finals for groups only; Unknown comes from complement later
   for g in "${ORDER[@]}"; do : > "${assign_dir}/final.${g}.ids.txt"; done
   awk -v dir="${assign_dir}" 'NR>1{print > (dir "/final." $2 ".ids.txt")}' "$tsv"
 }
