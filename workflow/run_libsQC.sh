@@ -13,7 +13,6 @@ set -euo pipefail
 if ! command -v conda >/dev/null 2>&1; then
   for CAND in "$HOME/mambaforge" "$HOME/miniforge3" "$HOME/miniconda3" "/opt/conda"; do
     if [ -f "$CAND/etc/profile.d/conda.sh" ]; then
-      # shellcheck disable=SC1091
       source "$CAND/etc/profile.d/conda.sh"
       break
     fi
@@ -26,6 +25,7 @@ THREADS="${THREADS:-4}"
 PRIMER_FWD="${PRIMER_FWD:-}"
 PRIMER_REV="${PRIMER_REV:-}"
 SEQ_SUMMARY="${SEQ_SUMMARY:-}"
+PRIORITY_GROUP="${PRIORITY_GROUP:-Bac}"
 
 # primer trimming tolerance, list support, and report dirs
 PRIMER_ERR="${PRIMER_ERR:-0.20}"        # max mismatch rate for cutadapt matches
@@ -111,6 +111,36 @@ PRIM_REV_BAC="GGTTACCTTGTTACGACTT"
 
 PRIM_FWD_BASID="TACTACCACCAAGATCT"
 PRIM_REV_BASID="ACCCGCTGAACTTAAGC"
+
+#group ordering helper
+groups_in_order() {
+  local base=(Archaea Ascomic Bac Basid)
+  local want=("${base[@]}")
+
+  # subset if ONLY_GROUPS is provided (comma-separated)
+  if [[ -n "${ONLY_GROUPS:-}" ]]; then
+    IFS=',' read -ra req <<< "$ONLY_GROUPS"
+    want=()
+    for g in "${req[@]}"; do
+      g="${g//[[:space:]]/}"; [[ -z "$g" ]] && continue
+      case "$g" in Archaea|Ascomic|Bac|Basid) want+=("$g");; esac
+    done
+    [[ ${#want[@]} -eq 0 ]] && want=("${base[@]}")
+  fi
+
+  # move PRIORITY_GROUP to front if present in list
+  if [[ -n "${PRIORITY_GROUP:-}" ]]; then
+    local pg="$PRIORITY_GROUP" tmp=() seen=0
+    for g in "${want[@]}"; do [[ "$g" == "$pg" ]] && seen=1; done
+    if [[ $seen -eq 1 ]]; then
+      tmp=("$pg")
+      for g in "${want[@]}"; do [[ "$g" != "$pg" ]] && tmp+=("$g"); done
+      want=("${tmp[@]}")
+    fi
+  fi
+
+  printf '%s\n' "${want[@]}"
+}
 
 # ----------------------------------------------------------
 # Function: ensure_channels
@@ -198,7 +228,7 @@ gather_fastq_files() {
     echo ">>> Found ${#FASTQ_FILES[@]} FASTQ files."
 }
 
-### limit to the first 3 fastqs as requested
+# limit to the first 3 fastqs as requested
 limit_to_three_fastqs() {
     if [ ${#FASTQ_FILES[@]} -gt 3 ]; then
         echo ">>> Limiting to first 3 FASTQs as requested."
@@ -238,7 +268,7 @@ build_fastq_meta() {
 #           write non-matching to a new remaining; continue
 #       leftover -> Unknown
 # ----------------------------------------------------------
-### function for grouping
+# function for grouping
 demux_by_primers() {
   echo ">>> Demultiplexing reads into groups by primer pairs ..."
   local groups_root="${RESULTS}/groups"
@@ -281,10 +311,15 @@ demux_by_primers() {
       [[ -f "$next" ]] && mv -f "$next" "$rem"
     }
 
-    _grab_group "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}"
-    _grab_group "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}"
-    _grab_group "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"
-    _grab_group "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"
+    # iterate groups in requested order
+    while IFS= read -r G; do
+      case "$G" in
+        Archaea) _grab_group "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" ;;
+        Ascomic) _grab_group "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" ;;
+        Bac)     _grab_group "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     ;;
+        Basid)   _grab_group "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   ;;
+      esac
+    done < <(groups_in_order)
 
     # leftover = Unknown
     local outdirU="${groups_root}/Unknown/data"
@@ -791,7 +826,8 @@ time_function demux_by_primers
 
 # ===== Per-group processing loop ==========================================
 # run all subsequent steps per group
-for GROUP in Archaea Ascomic Bac Basid Unknown; do
+# honor requested order (+Unknown at the end)
+for GROUP in $(groups_in_order) Unknown; do
   echo
   echo "================= GROUP: ${GROUP} ================="
 
