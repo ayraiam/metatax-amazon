@@ -262,8 +262,8 @@ demux_by_primers() {
       local outF="${outdir}/${b}.${grp}.fastq.gz"
       local next="${groups_root}/_tmp_${b}.${grp}_remaining.fastq.gz"
 
-      local OVL=10
-      if [[ "$grp" == "Basid" ]]; then OVL=8; fi
+      local OVL=16
+      if [[ "$grp" == "Basid" ]]; then OVL=12; fi
 
       # compute reverse-complement of the reverse primer (3' end of read)
       local REV_RC; REV_RC="$(revcomp_seq "$REV")"
