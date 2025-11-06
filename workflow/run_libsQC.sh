@@ -128,8 +128,12 @@ groups_in_order() {
   printf '%s\n' "${want[@]}"
 }
 
-#helper—write read IDs from FASTX stream
-_ids_from_fastx() { seqkit seq -n -i - | awk 'NF' > "$1"; }
+# helper—write read IDs from FASTX stream (keep original names)
+_ids_from_fastx() {
+  seqkit seq -n - \
+    | awk '{print $1}' \
+    | awk 'NF' > "$1"
+}
 
 # keep your anchored matching, add --info-file for stats
 _independent_match_one() {
