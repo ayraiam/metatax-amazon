@@ -164,45 +164,41 @@ _independent_match_one() {
 # - If a read ID appears in exactly ONE group => assign to that group
 # - If it appears in >1 groups => assign to Unknown (tie)
 # This avoids parsing cutadapt --info-file. Later we can enrich ties with stats.
-# helper: resolve assignments (unique best wins; ties -> Unknown)
+
 _resolve_assignments() {
   local assign_dir="$1"
 
-  # Clean slate
+  # Init outputs
   : > "${assign_dir}/assignments.tsv"
   echo -e "read_id\tassigned_group\terrors\tmatched_len" > "${assign_dir}/assignments.tsv"
 
-  # We’ll parse *.info.txt from each group to build a per-read score table
-  # Expected groups:
-  local GROUPS=(Archaea Ascomic Bac Basid)
+  # Use a plain string instead of a bash array (portable)
+  local GROUPS="Archaea Ascomic Bac Basid"
 
   # Temp unified table: read_id  group  errors  matched_len
   local SCORES="${assign_dir}/_per_read_scores.tsv"
   : > "${SCORES}"
 
-  for G in "${GROUPS[@]}"; do
+  # Collect per-group scores from cutadapt --info-file
+  for G in $GROUPS; do
     local info="${assign_dir}"/*."${G}".info.txt
     [[ -s $info ]] || continue
 
-    # cutadapt --info-file is TSV with a header; columns include:
-    # readname  adapter_name  rstart  rend  rlen  trimmed  errors  ...
-    # We’ll defensively find columns we need by name.
     awk -v G="$G" -F'\t' '
       BEGIN{IGNORECASE=1}
       NR==1{
         for(i=1;i<=NF;i++){
           if($i ~ /^name$|^readname$|^read_name$/) rn=i
           else if($i ~ /^errors?$/) err=i
-          else if($i ~ /^r?end$|matched_len|match_len|adapter_length/) ml=i
+          else if($i ~ /^matched_len$|^match_len$|^adapter_length$/) ml=i
           else if($i ~ /^rstart$/) rs=i
-          else if($i ~ /^rend$/) re=i
-          else if($i ~ /^rlen$/) rl=i
+          else if($i ~ /^rend$/)   re=i
         }
         next
       }
       {
         id = (rn? $rn : $1)
-        # best-effort matched length:
+        # best-effort matched length if matched_len column absent
         mlv = (ml ? $ml+0 : ( (re && rs) ? ($re-$rs+0) : 0 ))
         ev  = (err? $err+0 : 0)
         if(id!=""){
@@ -213,44 +209,34 @@ _resolve_assignments() {
     ' "$info" >> "${SCORES}"
   done
 
-  # If no scores at all, bail (everything will stay Unknown)
+  # If nothing to score, emit empty final files and return
   [[ -s "${SCORES}" ]] || {
-    for G in "${GROUPS[@]}"; do : > "${assign_dir}/final.${G}.ids.txt"; done
+    for G in $GROUPS; do : > "${assign_dir}/final.${G}.ids.txt"; done
     : > "${assign_dir}/assigned.ids.txt"
     return 0
   }
 
-  # Decide per read: unique lowest errors; tie-break by longer match; still tie -> Unknown
-  # Also emit final.<group>.ids.txt files.
-  for G in "${GROUPS[@]}"; do : > "${assign_dir}/final.${G}.ids.txt"; done
+  # Ensure empty final files exist before we append to them
+  for G in $GROUPS; do : > "${assign_dir}/final.${G}.ids.txt"; done
 
+  # Decide per read: fewest errors; tie -> longer match; still tie -> Unknown
   awk -F'\t' -v OFS='\t' -v dir="${assign_dir}" '
     {
       id=$1; g=$2; e=$3+0; ml=$4+0
-      key=id
-      if(!(key in bestE) || e < bestE[key] || (e == bestE[key] && ml > bestML[key])){
-        bestE[key]=e; bestML[key]=ml; bestG[key]=g; tie[key]=0
-      } else if (e == bestE[key] && ml == bestML[key] && g != bestG[key]) {
-        tie[key]=1
+      if(!(id in bestE) || e < bestE[id] || (e == bestE[id] && ml > bestML[id])){
+        bestE[id]=e; bestML[id]=ml; bestG[id]=g; tie[id]=0
+      } else if (e == bestE[id] && ml == bestML[id] && g != bestG[id]) {
+        tie[id]=1
       }
     }
     END{
-      # open group files
-      for(g in gf) close(gf[g])
-      groups["Archaea"]=1; groups["Ascomic"]=1; groups["Bac"]=1; groups["Basid"]=1
-      for(g in groups){
-        gf[g]=dir "/final." g ".ids.txt"
-      }
       out=dir "/assignments.tsv"
-      # append decisions
       for(id in bestG){
         if(tie[id]==1){
-          # send to Unknown by not writing into any final.<group>.ids.txt
-          # but still record in assignments as Unknown
           printf("%s\t%s\t%d\t%d\n", id, "Unknown", bestE[id], bestML[id]) >> out
         } else {
           printf("%s\t%s\t%d\t%d\n", id, bestG[id], bestE[id], bestML[id]) >> out
-          print id >> gf[ bestG[id] ]
+          print id >> (dir "/final." bestG[id] ".ids.txt")
         }
       }
     }
@@ -406,7 +392,7 @@ demux_by_primers() {
       cp -f "${groups_root}/${G}/matches/${b}.${G}.info.txt" "${assign_dir}/" 2>/dev/null || :
     done
 
-    # 3) Resolve conflicts (assign reads uniquely; ties -> Unknown)
+    # 3) Resolve assignments (unique best; ties -> Unknown)
     _resolve_assignments "${assign_dir}"
 
     # 4) Materialize per-group FASTQs using seqkit grep by sanitized IDs
