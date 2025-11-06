@@ -262,7 +262,6 @@ demux_by_primers() {
       local outF="${outdir}/${b}.${grp}.fastq.gz"
       local next="${groups_root}/_tmp_${b}.${grp}_remaining.fastq.gz"
 
-      # Use 10 for Archaea, Ascomic, Bac and 8 for Basid
       local OVL=10
       if [[ "$grp" == "Basid" ]]; then OVL=8; fi
 
@@ -272,7 +271,6 @@ demux_by_primers() {
       cutadapt -j "${THREADS}" \
         --match-read-wildcards --revcomp \
         -e "${PRIMER_ERR}" --overlap "${OVL}" \
-        --trimmed-only \
         -g "${FWD}" \
         -a "${REV_RC}" \
         -o "$outF" \
