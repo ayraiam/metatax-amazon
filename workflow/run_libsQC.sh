@@ -25,7 +25,6 @@ THREADS="${THREADS:-4}"
 PRIMER_FWD="${PRIMER_FWD:-}"
 PRIMER_REV="${PRIMER_REV:-}"
 SEQ_SUMMARY="${SEQ_SUMMARY:-}"
-PRIORITY_GROUP="${PRIORITY_GROUP:-Bac}"
 
 # primer trimming tolerance, list support, and report dirs
 PRIMER_ERR="${PRIMER_ERR:-0.20}"        # max mismatch rate for cutadapt matches
@@ -112,12 +111,11 @@ PRIM_REV_BAC="GGTTACCTTGTTACGACTT"
 PRIM_FWD_BASID="TACTACCACCAAGATCT"
 PRIM_REV_BASID="ACCCGCTGAACTTAAGC"
 
-#group ordering helper
+# fixed order (optionally filter by ONLY_GROUPS)
 groups_in_order() {
   local base=(Archaea Ascomic Bac Basid)
   local want=("${base[@]}")
 
-  # subset if ONLY_GROUPS is provided (comma-separated)
   if [[ -n "${ONLY_GROUPS:-}" ]]; then
     IFS=',' read -ra req <<< "$ONLY_GROUPS"
     want=()
@@ -127,19 +125,109 @@ groups_in_order() {
     done
     [[ ${#want[@]} -eq 0 ]] && want=("${base[@]}")
   fi
+  printf '%s\n' "${want[@]}"
+}
 
-  # move PRIORITY_GROUP to front if present in list
-  if [[ -n "${PRIORITY_GROUP:-}" ]]; then
-    local pg="$PRIORITY_GROUP" tmp=() seen=0
-    for g in "${want[@]}"; do [[ "$g" == "$pg" ]] && seen=1; done
-    if [[ $seen -eq 1 ]]; then
-      tmp=("$pg")
-      for g in "${want[@]}"; do [[ "$g" != "$pg" ]] && tmp+=("$g"); done
-      want=("${tmp[@]}")
-    fi
+#helper—write read IDs from FASTX stream
+_ids_from_fastx() { seqkit seq -n -i - | awk 'NF' > "$1"; }
+
+# keep your anchored matching, add --info-file for stats
+_independent_match_one() {
+  local inF="$1" grp="$2" FWD="$3" REV="$4" ovl="$5" outdir="$6"
+  mkdir -p "$outdir"
+  local base="${inF##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
+  local REV_RC; REV_RC="$(revcomp_seq "$REV")"
+  local kept="${outdir}/${base}.${grp}.kept.fastq.gz"
+  local ids="${outdir}/${base}.${grp}.ids.txt"
+  local info="${outdir}/${base}.${grp}.info.txt"
+
+  cutadapt -j "${THREADS}" --match-read-wildcards --revcomp \
+    -e "${PRIMER_ERR}" --overlap "${ovl}" \
+    -g "^${FWD}" -a "${REV_RC}\$" \
+    --discard-untrimmed \
+    --info-file "${info}" \
+    -o "${kept}" \
+    "$inF" > "${outdir}/${base}.${grp}.report.txt"
+
+  if [[ -s "${kept}" ]]; then
+    if [[ "${kept}" == *.gz ]]; then zcat "${kept}" | _ids_from_fastx "${ids}"; else cat "${kept}" | _ids_from_fastx "${ids}"; fi
+  else
+    : > "${ids}"
+  fi
+}
+
+# If errors and matched_len are both tied across ≥2 groups, we DO NOT assign the read;
+# it will fall into Unknown via the complement step later.
+_resolve_assignments_with_stats() {
+  local assign_dir="$1"; shift
+  mapfile -t ORDER < <(groups_in_order)
+
+  # union of all IDs that matched at least one group
+  local all_ids="${assign_dir}/_all.ids.txt"; : > "${all_ids}"
+  for g in "${ORDER[@]}"; do
+    cat "${assign_dir}"/*.${g}.ids.txt 2>/dev/null || true
+  done | awk 'NF' | sort -u > "${all_ids}"
+
+  # compile per-read, per-group scores from .info.txt
+  local tmp="${assign_dir}/_per_read_scores.tsv"; : > "${tmp}"
+  for g in "${ORDER[@]}"; do
+    for info in "${assign_dir}"/*."${g}".info.txt; do
+      [[ -s "$info" ]] || continue
+      awk -v G="$g" '
+        BEGIN{FS="\t"; OFS="\t"}
+        {
+          line=$0; id=$1;
+          err=0; mlen=0;
+          if (match(line, /errors=([0-9.]+)/, m)) { err=m[1]+0 }
+          if (match(line, /matched=([0-9]+)/, m2)) { mlen=m2[1]+0 }
+          if (mlen==0 && match(line, /overlap=([0-9]+)/, m3)) { mlen=m3[1]+0 }
+          print id, G, err, mlen
+        }
+      ' "$info" >> "$tmp"
+    done
+  done
+
+  # fallback if no info: treat presence as (err=0, mlen=0)
+  if [[ ! -s "$tmp" ]]; then
+    for g in "${ORDER[@]}"; do
+      for ids in "${assign_dir}"/*."${g}".ids.txt; do
+        [[ -s "$ids" ]] || continue
+        awk -v G="$g" 'BEGIN{OFS="\t"}{print $0, G, 0, 0}' "$ids" >> "$tmp"
+      done
+    done
   fi
 
-  printf '%s\n' "${want[@]}"
+  local tsv="${assign_dir}/assignments.tsv"
+  echo -e "read_id\tassigned_group\terrors\tmatched_len" > "$tsv"
+
+  awk -v OFS="\t" '
+    {
+      id=$1; g=$2; err=$3+0; m=$4+0;
+      if(!(id in be)){
+        be[id]=err; bm[id]=m; bg[id]=g; tie[id]=0;
+      } else {
+        if (err < be[id])          { be[id]=err; bm[id]=m; bg[id]=g; tie[id]=0 }
+        else if (err == be[id]) {
+          if (m > bm[id])          { bm[id]=m; be[id]=err; bg[id]=g; tie[id]=0 }
+          else if (m == bm[id])    { tie[id]=1 }  # exact tie on both metrics
+        }
+      }
+    }
+    END{
+      for(id in be){
+        if (tie[id]==1) {
+          # leave unassigned => will become Unknown later
+          next
+        } else {
+          print id, bg[id], be[id], bm[id];
+        }
+      }
+    }
+  ' "$tmp" | sort -k1,1 >> "$tsv"
+
+  # write finals for groups only; Unknown will be computed as complement later
+  for g in "${ORDER[@]}"; do : > "${assign_dir}/final.${g}.ids.txt"; done
+  awk -v dir="${assign_dir}" 'NR>1{print > (dir "/final." $2 ".ids.txt")}' "$tsv"
 }
 
 # ----------------------------------------------------------
@@ -258,76 +346,71 @@ build_fastq_meta() {
 }
 
 # ----------------------------------------------------------
-# Function: demux_by_primers (classify into 5 groups)
-#   Strategy: iterative partition with cutadapt
-#   - For each input FASTQ:
-#       remaining := file
-#       for group in Archaea, Ascomic, Bac, Basid:
-#           grab reads with -g F -a R (unanchored; tolerant with -e)
-#           write to results/groups/<GROUP>/data/<file>.fastq.gz
-#           write non-matching to a new remaining; continue
-#       leftover -> Unknown
+# Function: demux_by_primers
+#   For each input file:
+#     - For each group, run an independent anchored FWD/REV_RC match (no consumption)
+#     - Resolve conflicts by cutadapt stats (errors, matched len)
+#     - If tie persists, leave unassigned → goes to Unknown
+#     - Materialize per-group FASTQs and Unknown
 # ----------------------------------------------------------
-# function for grouping
 demux_by_primers() {
-  echo ">>> Demultiplexing reads into groups by primer pairs ..."
+  echo ">>> Demultiplexing (independent, non-destructive) ..."
   local groups_root="${RESULTS}/groups"
   mkdir -p "${groups_root}"
 
   for inF in "${FASTQ_FILES[@]}"; do
     local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
-    local rem="${groups_root}/_tmp_${b}.remaining.fastq.gz"
-    # ensure gz input
-    if [[ "$inF" == *.gz ]]; then
-      cp "$inF" "$rem"
-    else
-      gzip -c "$inF" > "$rem"
-    fi
 
-    # helper to run one group extraction
-    _grab_group() {
-      local grp="$1"; local FWD="$2"; local REV="$3"
-      local outdir="${groups_root}/${grp}/data"
-      mkdir -p "$outdir"
-      local outF="${outdir}/${b}.${grp}.fastq.gz"
-      local next="${groups_root}/_tmp_${b}.${grp}_remaining.fastq.gz"
-
-      local OVL=16
-      if [[ "$grp" == "Basid" ]]; then OVL=12; fi
-
-      # compute reverse-complement of the reverse primer (3' end of read)
-      local REV_RC; REV_RC="$(revcomp_seq "$REV")"
-
-      cutadapt -j "${THREADS}" \
-        --match-read-wildcards --revcomp \
-        -e "${PRIMER_ERR}" --overlap "${OVL}" \
-        -g "${FWD}" \
-        -a "${REV_RC}" \
-        -o "$outF" \
-        --untrimmed-output "$next" \
-        "$rem" \
-        > "${outdir}/${b}.${grp}.demux_report.txt"
-
-      [[ -f "$next" ]] && mv -f "$next" "$rem"
-    }
-
-    # iterate groups in requested order
+    # 1) Collect matching read IDs + info for each group independently
     while IFS= read -r G; do
       case "$G" in
-        Archaea) _grab_group "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" ;;
-        Ascomic) _grab_group "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" ;;
-        Bac)     _grab_group "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     ;;
-        Basid)   _grab_group "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   ;;
+        Archaea) OVL=16; _independent_match_one "$inF" "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" "$OVL" "${groups_root}/Archaea/matches" ;;
+        Ascomic) OVL=16; _independent_match_one "$inF" "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" "$OVL" "${groups_root}/Ascomic/matches" ;;
+        Bac)     OVL=16; _independent_match_one "$inF" "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     "$OVL" "${groups_root}/Bac/matches" ;;
+        Basid)   OVL=12; _independent_match_one "$inF" "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   "$OVL" "${groups_root}/Basid/matches" ;;
       esac
     done < <(groups_in_order)
 
-    # leftover = Unknown
-    local outdirU="${groups_root}/Unknown/data"
-    mkdir -p "$outdirU"
-    mv -f "$rem" "${outdirU}/${b}.Unknown.fastq.gz"
+    # 2) Resolve conflicts with per-read stats (no order tie-breaker; ties left unassigned)
+    local assign_dir="${groups_root}/_assign/${b}"; mkdir -p "${assign_dir}"
+    for G in Archaea Ascomic Bac Basid; do
+      cp -f "${groups_root}/${G}/matches/${b}.${G}.ids.txt"  "${assign_dir}/" 2>/dev/null || :
+      cp -f "${groups_root}/${G}/matches/${b}.${G}.info.txt" "${assign_dir}/" 2>/dev/null || :
+    done
+    _resolve_assignments_with_stats "${assign_dir}"
+
+    # 3) Materialize per-group FASTQs using seqkit grep by IDs
+    for G in Archaea Ascomic Bac Basid; do
+      outdir="${groups_root}/${G}/data"; mkdir -p "${outdir}"
+      outF="${outdir}/${b}.${G}.fastq.gz"
+      ids="${assign_dir}/final.${G}.ids.txt"
+      if [[ -s "${ids}" ]]; then
+        if [[ "$inF" == *.gz ]]; then
+          zcat "$inF" | seqkit grep -n -f "${ids}" -o "${outF}" -w 0
+        else
+          seqkit grep -n -f "${ids}" "$inF" | gzip > "${outF}"
+        fi
+      else
+        rm -f "${outF}" 2>/dev/null || true
+      fi
+    done
+
+    # 4) Unknown = reads not assigned anywhere (includes exact ties and non-matches)
+    cat "${assign_dir}"/final.*.ids.txt 2>/dev/null | sort -u > "${assign_dir}/assigned.ids.txt"
+    outdirU="${groups_root}/Unknown/data"; mkdir -p "${outdirU}"
+    outU="${outdirU}/${b}.Unknown.fastq.gz"
+    if [[ -s "${assign_dir}/assigned.ids.txt" ]]; then
+      if [[ "$inF" == *.gz ]]; then
+        zcat "$inF" | seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" -o "${outU}" -w 0
+      else
+        seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" "$inF" | gzip > "${outU}"
+      fi
+    else
+      if [[ "$inF" == *.gz ]]; then cp "$inF" "${outU}"; else gzip -c "$inF" > "${outU}"; fi
+    fi
   done
 
-  echo ">>> Demultiplexing complete. See ${groups_root}/*/data/"
+  echo ">>> Independent demux complete. See ${groups_root}/*/data/"
 }
 
 run_fastqc_all() {
@@ -798,18 +881,6 @@ START_TIME=$(date +%s)
 [ -d logs ] || mkdir -p logs
 : > logs/.timing.tsv
 
-# #if ONLY_FN is set, run just that across all groups and exit
-# if [[ -n "${ONLY_FN:-}" ]]; then
-#   # If your function needs the conda env, you can still initialize it:
-#   time_function create_env_libsQC
-#   time_function check_versions
-#   time_function export_env
-#   # We do NOT demux again; we assume groups already exist.
-#   single_function_runner "${ONLY_FN}"
-#   log_run_report
-#   exit 0
-# fi
-
 # Environment setup
 time_function create_env_libsQC
 time_function check_versions
@@ -820,14 +891,14 @@ time_function gather_fastq_files
 # only process first 3 files
 time_function limit_to_three_fastqs
 
-# 3) CLASSIFY reads into groups BEFORE any trimming/QC
-# demultiplex by primer pairs
+# 3) CLASSIFY reads into groups
 time_function demux_by_primers
 
 # ===== Per-group processing loop ==========================================
 # run all subsequent steps per group
 # honor requested order (+Unknown at the end)
 for GROUP in $(groups_in_order) Unknown; do
+
   echo
   echo "================= GROUP: ${GROUP} ================="
 
