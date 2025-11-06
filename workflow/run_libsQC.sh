@@ -236,13 +236,21 @@ demux_by_primers() {
       mkdir -p "$outdir"
       local outF="${outdir}/${b}.${grp}.fastq.gz"
       local next="${groups_root}/_tmp_${b}.${grp}_remaining.fastq.gz"
-      # capture matches to OUT; non-matches to NEXT
-      cutadapt -j "${THREADS}" -e "${PRIMER_ERR}" \
-        -g "${FWD}" -a "${REV}" \
+
+      #strict, anchored, linked; classification only — no trimming
+      # choose per-group overlap as requested:
+      local OVL=16
+      if [[ "$grp" == "Basid" ]]; then OVL=12; fi
+
+      cutadapt -j "${THREADS}" \
+        --match-read-wildcards --revcomp \
+        -e "${PRIMER_ERR}" --overlap "${OVL}" --no-trim \
+        -g "^[${FWD}]...rc(${REV})$" \
         -o "$outF" \
         --untrimmed-output "$next" \
         "$rem" \
         > "${outdir}/${b}.${grp}.demux_report.txt"
+
       mv -f "$next" "$rem"
     }
 
@@ -354,6 +362,9 @@ filter_amplicons() {
 
   parse_primers
 
+  # allow per-group overlap for trimming (defaults to 16; Basid will override to 12 in loop)
+  local OVERLAP_TRIM="${OVERLAP_TRIM:-16}"
+
   for f in "${FASTQ_FILES[@]}"; do
     base="${f##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
     out="${RESULTS}/filtered/${base}.filtered.fastq.gz"
@@ -361,8 +372,14 @@ filter_amplicons() {
 
     if [ ${#FORWARD_PRIMERS[@]} -gt 0 ] || [ ${#REVERSE_PRIMERS[@]} -gt 0 ]; then
       flags=$(cutadapt_primer_flags)
-      eval cutadapt $flags -j "${THREADS}" -e "$PRIMER_ERR" -o "$tmp" "$f" \
+
+      # per-group trimming: anchored, require both primers, overlap, wildcards, discard untrimmed
+      eval cutadapt $flags -j "${THREADS}" \
+        --match-read-wildcards --overlap "${OVERLAP_TRIM}" \
+        -e "$PRIMER_ERR" --discard-untrimmed \
+        -o "$tmp" "$f" \
         > "${PRIMER_TRIM_DIR}/${base}.cutadapt_trim_report.txt"
+
     else
       if [[ "$f" == *.gz ]]; then cp "$f" "$tmp"; else gzip -c "$f" > "$tmp"; fi
     fi
@@ -500,7 +517,7 @@ plot_fastq_length_boxplots() {
       return 0
     fi
 
-    # suffix copy (for downstream aggregation if you want it)
+    # suffix copy (for downstream aggregation)
     if [ -f "${OUT_DIR}/all_lengths.tsv" ]; then
       cp "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}/all_lengths_${LABEL}.tsv"
       echo ">>> Wrote ${OUT_DIR}/all_lengths_${LABEL}.tsv"
@@ -754,7 +771,7 @@ time_function export_env
 # Input discovery
 time_function gather_fastq_files
 # only process first 3 files
-#time_function limit_to_three_fastqs
+time_function limit_to_three_fastqs
 
 # 3) CLASSIFY reads into groups BEFORE any trimming/QC
 # demultiplex by primer pairs
@@ -792,9 +809,16 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
     Unknown) PRIMER_FWD_LIST=""; PRIMER_REV_LIST="";;
   esac
 
+  # per-group overlap for trimming step
+  case "$GROUP" in
+    Basid)  OVERLAP_TRIM=12 ;;
+    *)      OVERLAP_TRIM=16 ;;
+  esac
+  export OVERLAP_TRIM
+
   # Update primer dirs to group-scoped locations
   PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
-  PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
+  PRIMER_TRIM_DIR="${RESULTS}/primer_trimming}"
 
   # Initial QC on raw data (per group)
   time_function run_fastqc_all
