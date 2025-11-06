@@ -143,7 +143,7 @@ _independent_match_one() {
 
   cutadapt -j "${THREADS}" --match-read-wildcards --revcomp \
     -e "${PRIMER_ERR}" --overlap "${ovl}" \
-    -g "^${FWD}" -a "${REV_RC}\$" \
+    -g "${FWD}" -a "${REV_RC}" \
     --discard-untrimmed \
     --info-file "${info}" \
     -o "${kept}" \
