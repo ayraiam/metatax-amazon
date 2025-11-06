@@ -445,7 +445,7 @@ qc_flags_from_nanoplot() {
 
 plot_fastq_length_boxplots() {
     local LABEL="${1:-pre}"
-    local OUT_DIR="${2:-results/lengths}"
+    local OUT_DIR="${2:-${RESULTS}/lengths}"
     echo ">>> Preparing read-length boxplots for FASTQs (${LABEL}) -> ${OUT_DIR} ..."
     [ -d "${OUT_DIR}" ] || mkdir -p "${OUT_DIR}"
 
@@ -491,7 +491,7 @@ plot_fastq_length_boxplots() {
 
     echo ">>> Running R to generate the boxplot figure for ${LABEL} in ${OUT_DIR} ..."
     set +e
-    Rscript workflow/plot_fastq_lengths.R "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}" "${LABEL}"
+		Rscript workflow/plot_fastq_lengths.R "${OUT_DIR}/all_lengths.tsv" "${OUT_DIR}" "${LABEL}"
     rstat=$?
     set -e
     if [ $rstat -ne 0 ]; then
@@ -734,17 +734,17 @@ START_TIME=$(date +%s)
 [ -d logs ] || mkdir -p logs
 : > logs/.timing.tsv
 
-#if ONLY_FN is set, run just that across all groups and exit
-if [[ -n "${ONLY_FN:-}" ]]; then
-  # If your function needs the conda env, you can still initialize it:
-  time_function create_env_libsQC
-  time_function check_versions
-  time_function export_env
-  # We do NOT demux again; we assume groups already exist.
-  single_function_runner "${ONLY_FN}"
-  log_run_report
-  exit 0
-fi
+# #if ONLY_FN is set, run just that across all groups and exit
+# if [[ -n "${ONLY_FN:-}" ]]; then
+#   # If your function needs the conda env, you can still initialize it:
+#   time_function create_env_libsQC
+#   time_function check_versions
+#   time_function export_env
+#   # We do NOT demux again; we assume groups already exist.
+#   single_function_runner "${ONLY_FN}"
+#   log_run_report
+#   exit 0
+# fi
 
 # Environment setup
 time_function create_env_libsQC
