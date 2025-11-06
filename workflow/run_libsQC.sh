@@ -245,7 +245,7 @@ demux_by_primers() {
       cutadapt -j "${THREADS}" \
         --match-read-wildcards --revcomp \
         -e "${PRIMER_ERR}" --overlap "${OVL}" --no-trim \
-        -g "^[${FWD}]...rc(${REV})$" \
+        -g "^${FWD}...rc(${REV})$" \
         -o "$outF" \
         --untrimmed-output "$next" \
         "$rem" \
