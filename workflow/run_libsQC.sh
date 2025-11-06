@@ -28,7 +28,7 @@ PRIMER_REV="${PRIMER_REV:-}"
 SEQ_SUMMARY="${SEQ_SUMMARY:-}"
 
 # primer trimming tolerance, list support, and report dirs
-PRIMER_ERR="${PRIMER_ERR:-0.10}"        # max mismatch rate for cutadapt matches
+PRIMER_ERR="${PRIMER_ERR:-0.20}"        # max mismatch rate for cutadapt matches
 PRIMER_FWD_LIST="${PRIMER_FWD_LIST:-$PRIMER_FWD}"   # CSV or single value
 PRIMER_REV_LIST="${PRIMER_REV_LIST:-$PRIMER_REV}"   # CSV or single value
 
@@ -64,13 +64,13 @@ parse_primers() {
   done
 }
 
-# emit cutadapt -g/-a flags for all primers (anchored)
+# emit cutadapt -g/-a flags for all primers (unanchored)
 cutadapt_primer_flags() {
   local flags=()
-  for p in "${FORWARD_PRIMERS[@]}";  do flags+=( -g "^${p}" ); done
+  for p in "${FORWARD_PRIMERS[@]}";  do flags+=( -g "${p}" ); done
   for p in "${REVERSE_PRIMERS[@]}";  do
     local p_rc; p_rc="$(revcomp_seq "$p")"
-    flags+=( -a "${p_rc}\$" )
+    flags+=( -a "${p_rc}" )
   done
   printf '%q ' "${flags[@]}"
 }
@@ -237,7 +237,6 @@ build_fastq_meta() {
 #           write to results/groups/<GROUP>/data/<file>.fastq.gz
 #           write non-matching to a new remaining; continue
 #       leftover -> Unknown
-#   (We do not trim here; only classify.)
 # ----------------------------------------------------------
 ### function for grouping
 demux_by_primers() {
@@ -263,18 +262,19 @@ demux_by_primers() {
       local outF="${outdir}/${b}.${grp}.fastq.gz"
       local next="${groups_root}/_tmp_${b}.${grp}_remaining.fastq.gz"
 
-      #strict, anchored, linked; classification only — no trimming
-      # choose per-group overlap as requested:
-      local OVL=16
-      if [[ "$grp" == "Basid" ]]; then OVL=12; fi
+      # Use 10 for Archaea, Ascomic, Bac and 8 for Basid
+      local OVL=10
+      if [[ "$grp" == "Basid" ]]; then OVL=8; fi
 
       # compute reverse-complement of the reverse primer (3' end of read)
       local REV_RC; REV_RC="$(revcomp_seq "$REV")"
 
       cutadapt -j "${THREADS}" \
         --match-read-wildcards --revcomp \
-        -e "${PRIMER_ERR}" --overlap "${OVL}" --no-trim \
-        -g "^${FWD}...${REV_RC}\$" \
+        -e "${PRIMER_ERR}" --overlap "${OVL}" \
+        --trimmed-only \
+        -g "${FWD}" \
+        -a "${REV_RC}" \
         -o "$outF" \
         --untrimmed-output "$next" \
         "$rem" \
@@ -391,30 +391,15 @@ filter_amplicons() {
 
   parse_primers
 
-  # allow per-group overlap for trimming (defaults to 16; Basid will override to 12 in loop)
-  local OVERLAP_TRIM="${OVERLAP_TRIM:-16}"
-
   for f in "${FASTQ_FILES[@]}"; do
     base="${f##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
     out="${RESULTS}/filtered/${base}.filtered.fastq.gz"
-    tmp="${RESULTS}/filtered/${base}.tmp.fastq.gz"
 
-    if [ ${#FORWARD_PRIMERS[@]} -gt 0 ] || [ ${#REVERSE_PRIMERS[@]} -gt 0 ]; then
-      flags=$(cutadapt_primer_flags)
-
-      # per-group trimming: anchored, require both primers, overlap, wildcards, discard untrimmed
-      eval cutadapt $flags -j "${THREADS}" \
-        --match-read-wildcards --overlap "${OVERLAP_TRIM}" \
-        -e "$PRIMER_ERR" --discard-untrimmed \
-        -o "$tmp" "$f" \
-        > "${PRIMER_TRIM_DIR}/${base}.cutadapt_trim_report.txt"
-
+    if [[ "$f" == *.gz ]]; then
+      zcat "$f" | NanoFilt -q "$MEANQ" -l "$LEN_MIN" --maxlength "$LEN_MAX" | gzip > "$out"
     else
-      if [[ "$f" == *.gz ]]; then cp "$f" "$tmp"; else gzip -c "$f" > "$tmp"; fi
+      cat "$f" | NanoFilt -q "$MEANQ" -l "$LEN_MIN" --maxlength "$LEN_MAX" | gzip > "$out"
     fi
-
-    zcat "$tmp" | NanoFilt -q "$MEANQ" -l "$LEN_MIN" --maxlength "$LEN_MAX" | gzip > "$out"
-    rm -f "$tmp"
   done
 
   echo ">>> Filtered -> ${RESULTS}/filtered/"
@@ -838,14 +823,6 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
     Unknown) PRIMER_FWD_LIST=""; PRIMER_REV_LIST="";;
   esac
 
-  # per-group overlap for trimming step
-  case "$GROUP" in
-    Basid)  OVERLAP_TRIM=12 ;;
-    *)      OVERLAP_TRIM=16 ;;
-  esac
-  export OVERLAP_TRIM
-
-  # Update primer dirs to group-scoped locations
   PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
   PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
 
@@ -862,7 +839,6 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
   time_function qc_flags_from_nanoplot
   time_function "plot_fastq_length_boxplots pre results/groups/${GROUP}/lengths"
 
-  # Filtering step (trim primers + NanoFilt) and verify
   time_function filter_amplicons
   time_function verify_primer_removal
   time_function re_qc_filtered
