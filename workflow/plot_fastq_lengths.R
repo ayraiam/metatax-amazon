@@ -1,7 +1,7 @@
 # make the script accept infile, outdir, and label
 args    <- commandArgs(trailingOnly = TRUE)
 infile  <- if (length(args) >= 1) args[1] else "results/lengths/all_lengths.tsv"
-outdir  <- if (length(args) >= 2) args[2] else "results/lengths"
+outdir  <- if (length(args) >= 2) args[2] else dirname(infile)
 label   <- if (length(args) >= 3) args[3] else ""
 
 suffix  <- if (nzchar(label)) paste0("_", label) else ""
