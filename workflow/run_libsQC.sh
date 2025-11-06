@@ -160,76 +160,64 @@ _independent_match_one() {
   fi
 }
 
-# If errors and matched_len are both tied across ≥2 groups, we DO NOT assign the read;
-# it will fall into Unknown via the complement step later.
-_resolve_assignments_with_stats() {
-  local assign_dir="$1"; shift
-  mapfile -t ORDER < <(groups_in_order)
+# helper—resolve assignments without stats:
+# - If a read ID appears in exactly ONE group => assign to that group
+# - If it appears in >1 groups => assign to Unknown (tie)
+# This avoids parsing cutadapt --info-file. Later we can enrich ties with stats.
+_resolve_assignments() {
+  local assign_dir="$1"
 
-  # union of all IDs that matched at least one group
-  local all_ids="${assign_dir}/_all.ids.txt"; : > "${all_ids}"
-  for g in "${ORDER[@]}"; do
-    cat "${assign_dir}"/*.${g}.ids.txt 2>/dev/null || true
-  done | awk 'NF' | sort -u > "${all_ids}"
-
-  # compile per-read, per-group scores from .info.txt
-  local tmp="${assign_dir}/_per_read_scores.tsv"; : > "${tmp}"
-  for g in "${ORDER[@]}"; do
-    for info in "${assign_dir}"/*."${g}".info.txt; do
-      [[ -s "$info" ]] || continue
-      awk -v G="$g" '
-        BEGIN{FS="\t"; OFS="\t"}
-        {
-          line=$0; id=$1;
-          err=0; mlen=0;
-          if (match(line, /errors=([0-9.]+)/, m)) { err=m[1]+0 }
-          if (match(line, /matched=([0-9]+)/, m2)) { mlen=m2[1]+0 }
-          if (mlen==0 && match(line, /overlap=([0-9]+)/, m3)) { mlen=m3[1]+0 }
-          print id, G, err, mlen
-        }
-      ' "$info" >> "${tmp}"
-    done
+  # Collect per-group id files present in assign_dir (copied there earlier)
+  local groups=(Archaea Ascomic Bac Basid)
+  local present=()
+  for g in "${groups[@]}"; do
+    if compgen -G "${assign_dir}/*.${g}.ids.txt" >/dev/null; then
+      present+=("$g")
+    fi
   done
 
-  # fallback if no info: treat presence as (err=0, mlen=0)
-  if [[ ! -s "$tmp" ]]; then
-    for g in "${ORDER[@]}"; do
-      for ids in "${assign_dir}"/*."${g}".ids.txt; do
-        [[ -s "$ids" ]] || continue
-        awk -v G="$g" 'BEGIN{OFS="\t"}{print $0, G, 0, 0}' "$ids" >> "$tmp"
-      done
-    done
+  # Build a big table: read_id \t group
+  local tmp="${assign_dir}/_id2grp.tsv"
+  : > "${tmp}"
+  for g in "${present[@]}"; do
+    cat "${assign_dir}"/*.${g}.ids.txt 2>/dev/null \
+      | awk -v G="$g" 'NF{print $1 "\t" G}' >> "${tmp}"
+  done
+
+  # If empty, write empty outputs and return
+  if [[ ! -s "${tmp}" ]]; then
+    echo -e "read_id\tassigned_group\terrors\tmatched_len" > "${assign_dir}/assignments.tsv"
+    for g in "${present[@]}"; do : > "${assign_dir}/final.${g}.ids.txt"; done
+    : > "${assign_dir}/assigned.ids.txt"
+    return 0
   fi
 
-  local tsv="${assign_dir}/assignments.tsv"
-  echo -e "read_id\tassigned_group\terrors\tmatched_len" > "$tsv"
+  # Count how many groups each read belongs to; assign singles; mark ties
+  # Write final.<group>.ids.txt and assignments.tsv. Ties go to Unknown (handled later).
+  for g in "${present[@]}"; do : > "${assign_dir}/final.${g}.ids.txt"; done
+  : > "${assign_dir}/assigned.ids.txt"
+  echo -e "read_id\tassigned_group\terrors\tmatched_len" > "${assign_dir}/assignments.tsv"
 
-  awk -v OFS="\t" '
+  awk -v dir="${assign_dir}" '
     {
-      id=$1; g=$2; err=$3+0; m=$4+0;
-      if(!(id in be)){
-        be[id]=err; bm[id]=m; bg[id]=g; tie[id]=0;
-      } else {
-        if (err < be[id])          { be[id]=err; bm[id]=m; bg[id]=g; tie[id]=0 }
-        else if (err == be[id]) {
-          if (m > bm[id])          { bm[id]=m; be[id]=err; bg[id]=g; tie[id]=0 }
-          else if (m == bm[id])    { tie[id]=1 }  # exact tie on both metrics
-        }
-      }
+      id=$1; grp=$2;
+      key=id;
+      if(!(key in seen)){n[key]=0}
+      n[key]++; gL[key]= (gL[key]? gL[key] "," grp : grp)
     }
     END{
-      for(id in be){
-        if (tie[id]==0) {
-          print id, bg[id], be[id], bm[id];
+      # emit per-read assignment lines; singles only now
+      for(id in n){
+        if(n[id]==1){
+          # extract the single group from gL[id]
+          split(gL[id], arr, ","); grp=arr[1];
+          print id "\t" grp "\tNA\tNA" >> dir "/assignments.tsv"
+          print id >> dir "/final." grp ".ids.txt"
+          print id >> dir "/assigned.ids.txt"
         }
-        # if tie[id]==1 we print nothing (unassigned -> Unknown)
       }
     }
-  ' "$tmp" | sort -k1,1 >> "$tsv"
-
-  # write finals for groups only; Unknown comes from complement later
-  for g in "${ORDER[@]}"; do : > "${assign_dir}/final.${g}.ids.txt"; done
-  awk -v dir="${assign_dir}" 'NR>1{print > (dir "/final." $2 ".ids.txt")}' "$tsv"
+  ' "${tmp}"
 }
 
 # ----------------------------------------------------------
@@ -348,11 +336,10 @@ build_fastq_meta() {
 }
 
 # ----------------------------------------------------------
-# Function: demux_by_primers
+# Function: demux_by_primers — INDEPENDENT (non-destructive)
 #   For each input file:
-#     - For each group, run an independent anchored FWD/REV_RC match (no consumption)
-#     - Resolve conflicts by cutadapt stats (errors, matched len)
-#     - If tie persists, leave unassigned → goes to Unknown
+#     - For each group, run an independent anchored linked match (no consumption)
+#     - Resolve conflicts: unique matches to their group; multi-group -> Unknown
 #     - Materialize per-group FASTQs and Unknown
 # ----------------------------------------------------------
 demux_by_primers() {
@@ -363,7 +350,7 @@ demux_by_primers() {
   for inF in "${FASTQ_FILES[@]}"; do
     local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
 
-    # 1) Collect matching read IDs + info for each group independently
+    # 1) For each group, collect matching read IDs without consuming input
     while IFS= read -r G; do
       case "$G" in
         Archaea) OVL=16; _independent_match_one "$inF" "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" "$OVL" "${groups_root}/Archaea/matches" ;;
@@ -371,43 +358,56 @@ demux_by_primers() {
         Bac)     OVL=16; _independent_match_one "$inF" "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     "$OVL" "${groups_root}/Bac/matches" ;;
         Basid)   OVL=12; _independent_match_one "$inF" "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   "$OVL" "${groups_root}/Basid/matches" ;;
       esac
-    done < <(groups_in_order)
+    done < <(printf '%s\n' Archaea Ascomic Bac Basid)
 
-    # 2) Resolve conflicts with per-read stats (no order tie-breaker; ties left unassigned)
-    local assign_dir="${groups_root}/_assign/${b}"; mkdir -p "${assign_dir}"
+    # 2) Copy *.ids.txt for all groups into per-sample _assign directory
+    local assign_dir="${groups_root}/_assign/${b}"
+    mkdir -p "${assign_dir}"
+
     for G in Archaea Ascomic Bac Basid; do
-      cp -f "${groups_root}/${G}/matches/${b}.${G}.ids.txt"  "${assign_dir}/" 2>/dev/null || :
-      cp -f "${groups_root}/${G}/matches/${b}.${G}.info.txt" "${assign_dir}/" 2>/dev/null || :
+      cp -f "${groups_root}/${G}/matches/${b}.${G}.ids.txt" "${assign_dir}/" 2>/dev/null || :
     done
-    _resolve_assignments_with_stats "${assign_dir}"
 
-    # 3) Materialize per-group FASTQs using seqkit grep by IDs
+    # 3) Resolve conflicts (assign reads uniquely; ties -> Unknown)
+    _resolve_assignments "${assign_dir}"
+
+    # 4) Materialize per-group FASTQs using seqkit grep by sanitized IDs
     for G in Archaea Ascomic Bac Basid; do
-      outdir="${groups_root}/${G}/data"; mkdir -p "${outdir}"
-      outF="${outdir}/${b}.${G}.fastq.gz"
-      ids="${assign_dir}/final.${G}.ids.txt"
+      local outdir="${groups_root}/${G}/data"; mkdir -p "${outdir}"
+      local outF="${outdir}/${b}.${G}.fastq.gz"
+      local ids="${assign_dir}/final.${G}.ids.txt"
+
       if [[ -s "${ids}" ]]; then
+        # sanitize ID list (trim CR/LF/extra fields) before grepping
+        awk 'NF{gsub(/\r/,""); print $1}' "${ids}" > "${ids}.clean"
+
         if [[ "$inF" == *.gz ]]; then
-          zcat "$inF" | seqkit grep -n -f "${ids}" -o "${outF}" -w 0
+          zcat "$inF" | seqkit grep -n -f "${ids}.clean" -o "${outF}" -w 0
         else
-          seqkit grep -n -f "${ids}" "$inF" | gzip > "${outF}"
+          seqkit grep -n -f "${ids}.clean" "$inF" | gzip > "${outF}"
         fi
       else
+        # no reads for this group -> ensure no stale file remains
         rm -f "${outF}" 2>/dev/null || true
       fi
     done
 
-    # 4) Unknown = reads not assigned anywhere (includes exact ties and non-matches)
+    # 5) Unknown = reads not assigned anywhere
     cat "${assign_dir}"/final.*.ids.txt 2>/dev/null | sort -u > "${assign_dir}/assigned.ids.txt"
-    outdirU="${groups_root}/Unknown/data"; mkdir -p "${outdirU}"
-    outU="${outdirU}/${b}.Unknown.fastq.gz"
+    local outdirU="${groups_root}/Unknown/data"; mkdir -p "${outdirU}"
+    local outU="${outdirU}/${b}.Unknown.fastq.gz"
+
     if [[ -s "${assign_dir}/assigned.ids.txt" ]]; then
+      # sanitize assigned list too, just in case
+      awk 'NF{gsub(/\r/,""); print $1}' "${assign_dir}/assigned.ids.txt" > "${assign_dir}/assigned.ids.clean"
+
       if [[ "$inF" == *.gz ]]; then
-        zcat "$inF" | seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" -o "${outU}" -w 0
+        zcat "$inF" | seqkit grep -n -v -f "${assign_dir}/assigned.ids.clean" -o "${outU}" -w 0
       else
-        seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" "$inF" | gzip > "${outU}"
+        seqkit grep -n -v -f "${assign_dir}/assigned.ids.clean" "$inF" | gzip > "${outU}"
       fi
     else
+      # no assigned reads -> all are unknown
       if [[ "$inF" == *.gz ]]; then cp "$inF" "${outU}"; else gzip -c "$inF" > "${outU}"; fi
     fi
   done
