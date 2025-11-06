@@ -68,8 +68,34 @@ parse_primers() {
 cutadapt_primer_flags() {
   local flags=()
   for p in "${FORWARD_PRIMERS[@]}";  do flags+=( -g "^${p}" ); done
-  for p in "${REVERSE_PRIMERS[@]}";  do flags+=( -a "rc:${p}\$" ); done
+  for p in "${REVERSE_PRIMERS[@]}";  do
+    local p_rc; p_rc="$(revcomp_seq "$p")"
+    flags+=( -a "${p_rc}\$" )
+  done
   printf '%q ' "${flags[@]}"
+}
+
+#reverse-complement helper (uppercase, supports IUPAC)
+revcomp_seq() {
+  awk -v s="$1" 'BEGIN{
+    split("A T C G R Y S W K M B D H V N", k);
+    for(i in k){c[k[i]]=k[i]}
+    c["A"]="T"; c["T"]="A"; c["C"]="G"; c["G"]="C";
+    c["R"]="Y"; c["Y"]="R"; c["S"]="S"; c["W"]="W";
+    c["K"]="M"; c["M"]="K"; c["B"]="V"; c["V"]="B";
+    c["D"]="H"; c["H"]="D"; c["N"]="N";
+    # lowercase too (just in case)
+    c["a"]="t"; c["t"]="a"; c["c"]="g"; c["g"]="c";
+    c["r"]="y"; c["y"]="r"; c["s"]="s"; c["w"]="w";
+    c["k"]="m"; c["m"]="k"; c["b"]="v"; c["v"]="b";
+    c["d"]="h"; c["h"]="d"; c["n"]="n";
+    n=length(s); out="";
+    for(i=n;i>=1;i--){
+      base=substr(s,i,1);
+      out=out toupper((base in c)? c[base]: base);
+    }
+    print out;
+  }'
 }
 
 # --- Convenience: per-group primer pairs (FOR CLASSIFICATION) ------------
@@ -242,16 +268,19 @@ demux_by_primers() {
       local OVL=16
       if [[ "$grp" == "Basid" ]]; then OVL=12; fi
 
+      # compute reverse-complement of the reverse primer (3' end of read)
+      local REV_RC; REV_RC="$(revcomp_seq "$REV")"
+
       cutadapt -j "${THREADS}" \
         --match-read-wildcards --revcomp \
         -e "${PRIMER_ERR}" --overlap "${OVL}" --no-trim \
-        -g "^${FWD}...rc:${REV}$" \
+        -g "^${FWD}...${REV_RC}\$" \
         -o "$outF" \
         --untrimmed-output "$next" \
         "$rem" \
         > "${outdir}/${b}.${grp}.demux_report.txt"
 
-      mv -f "$next" "$rem"
+      [[ -f "$next" ]] && mv -f "$next" "$rem"
     }
 
     _grab_group "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}"
