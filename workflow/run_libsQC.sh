@@ -135,29 +135,29 @@ _ids_from_fastx() {
     | awk 'NF' > "$1"
 }
 
-# keep your anchored matching, add --info-file for stats
+# replace your _independent_match_one with this version
 _independent_match_one() {
   local inF="$1" grp="$2" FWD="$3" REV="$4" ovl="$5" outdir="$6"
   mkdir -p "$outdir"
   local base="${inF##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
   local REV_RC; REV_RC="$(revcomp_seq "$REV")"
-  local kept="${outdir}/${base}.${grp}.kept.fastq.gz"
-  local ids="${outdir}/${base}.${grp}.ids.txt"
-  local info="${outdir}/${base}.${grp}.info.txt"
 
-  cutadapt -j "${THREADS}" --match-read-wildcards --revcomp \
+  # per-job cores (default 2); avoids oversubscribing when we parallelize groups
+  local CAD_CORES="${CUTADAPT_CORES_PER:-2}"
+
+  # we only need IDs + stats; send trimmed reads to /dev/null
+  cutadapt -j "${CAD_CORES}" \
+    --match-read-wildcards --revcomp \
     -e "${PRIMER_ERR}" --overlap "${ovl}" \
-    -g "${FWD}" -a "${REV_RC}" \
+    -g "^${FWD}" -a "${REV_RC}\$" \
     --discard-untrimmed \
-    --info-file "${info}" \
-    -o "${kept}" \
+    --info-file "${outdir}/${base}.${grp}.info.txt" \
+    -o /dev/null \
     "$inF" > "${outdir}/${base}.${grp}.report.txt"
 
-  if [[ -s "${kept}" ]]; then
-    if [[ "${kept}" == *.gz ]]; then zcat "${kept}" | _ids_from_fastx "${ids}"; else cat "${kept}" | _ids_from_fastx "${ids}"; fi
-  else
-    : > "${ids}"
-  fi
+  # extract read IDs seen in info.txt (faster than writing a kept FASTQ)
+  # cutadapt --info-file lines start with read id; strip CRs & blanks
+  awk 'NF{gsub(/\r/,""); print $1}' "${outdir}/${base}.${grp}.info.txt" > "${outdir}/${base}.${grp}.ids.txt"
 }
 
 # helper—resolve assignments without stats:
@@ -461,76 +461,133 @@ build_fastq_meta() {
 #     - Materialize per-group FASTQs and Unknown
 # ----------------------------------------------------------
 demux_by_primers() {
-  echo ">>> Demultiplexing (independent, non-destructive) ..."
+  echo ">>> Demultiplexing (independent, non-destructive, per-FASTQ parallel group matches) ..."
   local groups_root="${RESULTS}/groups"
   mkdir -p "${groups_root}"
 
   for inF in "${FASTQ_FILES[@]}"; do
     local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
 
-    # 1) For each group, collect matching read IDs without consuming input
-    #    (Basid gets overlap 12; others 16)
-    while IFS= read -r G; do
-      case "$G" in
-        Archaea) OVL=16; _independent_match_one "$inF" "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" "$OVL" "${groups_root}/Archaea/matches" ;;
-        Ascomic) OVL=16; _independent_match_one "$inF" "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" "$OVL" "${groups_root}/Ascomic/matches" ;;
-        Bac)     OVL=16; _independent_match_one "$inF" "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     "$OVL" "${groups_root}/Bac/matches" ;;
-        Basid)   OVL=12; _independent_match_one "$inF" "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   "$OVL" "${groups_root}/Basid/matches" ;;
-      esac
-    done < <(printf '%s\n' Archaea Ascomic Bac Basid)
+    # -------------------------------
+    # PARALLEL: run group matches for this FASTQ in parallel
+    #   - avoid over-threading: split total THREADS across concurrent jobs
+    # -------------------------------
+    local -a GRPS=("Archaea" "Ascomic" "Bac" "Basid")
+    local NG=${#GRPS[@]}
+    # at least 1 thread per cutadapt; integer floor
+    local JOB_THR=$(( THREADS / NG ))
+    [[ ${JOB_THR} -lt 1 ]] && JOB_THR=1
 
-    # 2) Resolve conflicts and create final per-group ID lists
-    local assign_dir="${groups_root}/_assign/${b}"; mkdir -p "${assign_dir}"
-    for G in Archaea Ascomic Bac Basid; do
-      # copy IDs and info files for the resolver
+    # launch per-group cutadapt matches in background
+    local pids=()
+    for G in "${GRPS[@]}"; do
+      local OVL=16
+      [[ "$G" == "Basid" ]] && OVL=12
+
+      case "$G" in
+        Archaea)
+          THREADS=${JOB_THR} _independent_match_one "$inF" "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" "$OVL" "${groups_root}/Archaea/matches" &
+          ;;
+        Ascomic)
+          THREADS=${JOB_THR} _independent_match_one "$inF" "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" "$OVL" "${groups_root}/Ascomic/matches" &
+          ;;
+        Bac)
+          THREADS=${JOB_THR} _independent_match_one "$inF" "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     "$OVL" "${groups_root}/Bac/matches" &
+          ;;
+        Basid)
+          THREADS=${JOB_THR} _independent_match_one "$inF" "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   "$OVL" "${groups_root}/Basid/matches" &
+          ;;
+      esac
+      pids+=($!)
+    done
+
+    # wait for all four group-match jobs of this FASTQ
+    local pid rc=0
+    for pid in "${pids[@]}"; do
+      wait "$pid" || rc=$?
+    done
+    if [[ $rc -ne 0 ]]; then
+      echo "!!! One or more group-match jobs failed for ${b} (rc=${rc}). Continuing, but assignments may be incomplete." >&2
+    fi
+
+    # -------------------------------
+    # Resolve conflicts -> final.*.ids.txt (uses your existing resolver)
+    # -------------------------------
+    local assign_dir="${groups_root}/_assign/${b}"
+    mkdir -p "${assign_dir}"
+    for G in "${GRPS[@]}"; do
+      # copy ids + info produced by _independent_match_one (if present)
       cp -f "${groups_root}/${G}/matches/${b}.${G}.ids.txt"  "${assign_dir}/" 2>/dev/null || :
       cp -f "${groups_root}/${G}/matches/${b}.${G}.info.txt" "${assign_dir}/" 2>/dev/null || :
     done
+
+    # keep calling your resolver (it may use the info files to score/tie-break)
     _resolve_assignments "${assign_dir}"
 
-    # 3) Materialize per-group FASTQs using cleaned ID lists  
-    for G in Archaea Ascomic Bac Basid; do
-      outdir="${groups_root}/${G}/data"; mkdir -p "${outdir}"
-      outF="${outdir}/${b}.${G}.fastq.gz"
-      ids_raw="${assign_dir}/final.${G}.ids.txt"
-      ids_clean="${assign_dir}/final.${G}.ids.clean.txt"
+    # -------------------------------
+    # Materialize per-group FASTQs from the original input, using CLEANED id lists
+    # -------------------------------
+    for G in "${GRPS[@]}"; do
+      local outdir="${groups_root}/${G}/data"; mkdir -p "${outdir}"
+      local outF="${outdir}/${b}.${G}.fastq.gz"
+      local ids_raw="${assign_dir}/final.${G}.ids.txt"
+      local ids_clean="${assign_dir}/final.${G}.ids.clean.txt"
 
-      # sanitize IDs (strip CR, trim, drop empties)
       if [[ -s "${ids_raw}" ]]; then
-        awk 'NF{gsub(/\r/,""); print $1}' "${ids_raw}" | sed 's/[[:space:]]\+$//' > "${ids_clean}"
-      else
-        : > "${ids_clean}"
-      fi
+        # normalize IDs to be safe for grep:
+        #  - strip CR/LF noise, trim trailing spaces, drop empties, unique
+        tr -d '\r' < "${ids_raw}" \
+          | sed 's/[[:space:]]\+$//' \
+          | awk 'NF' \
+          | sort -u > "${ids_clean}"
 
-      if [[ -s "${ids_clean}" ]]; then
-        if [[ "$inF" == *.gz ]]; then
-          # write compressed output directly
-          zcat "$inF" | seqkit grep -n -f "${ids_clean}" -w 0 | gzip > "${outF}"
+        if [[ "${inF}" == *.gz ]]; then
+          # seqkit writes gz when -o ends with .gz
+          zcat "${inF}" | seqkit grep -n -f "${ids_clean}" -o "${outF}" -w 0
         else
-          seqkit grep -n -f "${ids_clean}" "$inF" -w 0 | gzip > "${outF}"
+          seqkit grep -n -f "${ids_clean}" "${inF}" | gzip > "${outF}"
         fi
       else
         rm -f "${outF}" 2>/dev/null || true
       fi
     done
 
-    # 4) Unknown = reads not assigned anywhere
+    # Unknown = reads not assigned anywhere
     cat "${assign_dir}"/final.*.ids.txt 2>/dev/null | awk 'NF' | sort -u > "${assign_dir}/assigned.ids.txt"
-    outdirU="${groups_root}/Unknown/data"; mkdir -p "${outdirU}"
-    outU="${outdirU}/${b}.Unknown.fastq.gz"
+    local outdirU="${groups_root}/Unknown/data"; mkdir -p "${outdirU}"
+    local outU="${outdirU}/${b}.Unknown.fastq.gz"
     if [[ -s "${assign_dir}/assigned.ids.txt" ]]; then
-      if [[ "$inF" == *.gz ]]; then
-        zcat "$inF" | seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" -w 0 | gzip > "${outU}"
+      if [[ "${inF}" == *.gz ]]; then
+        zcat "${inF}" | seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" -o "${outU}" -w 0
       else
-        seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" "$inF" -w 0 | gzip > "${outU}"
+        seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" "${inF}" | gzip > "${outU}"
       fi
     else
-      # nobody assigned → all Unknown
-      if [[ "$inF" == *.gz ]]; then cp "$inF" "${outU}"; else gzip -c "$inF" > "${outU}"; fi
+      # no assigned reads -> everything is Unknown
+      if [[ "${inF}" == *.gz ]]; then cp "${inF}" "${outU}"; else gzip -c "${inF}" > "${outU}"; fi
     fi
   done
 
   echo ">>> Independent demux complete. See ${groups_root}/*/data/"
+
+  # -------------------------------
+  # (Optional) Nuke giant intermediates after assigning
+  #   - Set KEEP_MATCHES=1 to keep *.kept.fastq.gz
+  #   - Set KEEP_INFO=1    to keep *.info.txt (large)
+  # -------------------------------
+  if [[ "${KEEP_MATCHES:-0}" -ne 1 ]]; then
+    rm -f "${groups_root}/Archaea/matches/${b}.Archaea.kept.fastq.gz" 2>/dev/null || true
+    rm -f "${groups_root}/Ascomic/matches/${b}.Ascomic.kept.fastq.gz" 2>/dev/null || true
+    rm -f "${groups_root}/Bac/matches/${b}.Bac.kept.fastq.gz"         2>/dev/null || true
+    rm -f "${groups_root}/Basid/matches/${b}.Basid.kept.fastq.gz"     2>/dev/null || true
+  fi
+  if [[ "${KEEP_INFO:-0}" -ne 1 ]]; then
+    rm -f "${groups_root}/Archaea/matches/${b}.Archaea.info.txt"  2>/dev/null || true
+    rm -f "${groups_root}/Ascomic/matches/${b}.Ascomic.info.txt"  2>/dev/null || true
+    rm -f "${groups_root}/Bac/matches/${b}.Bac.info.txt"          2>/dev/null || true
+    rm -f "${groups_root}/Basid/matches/${b}.Basid.info.txt"      2>/dev/null || true
+  fi
+
 }
 
 run_fastqc_all() {
