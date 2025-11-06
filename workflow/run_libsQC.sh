@@ -164,27 +164,28 @@ _independent_match_one() {
 # - If a read ID appears in exactly ONE group => assign to that group
 # - If it appears in >1 groups => assign to Unknown (tie)
 # This avoids parsing cutadapt --info-file. Later we can enrich ties with stats.
-
 _resolve_assignments() {
-  local assign_dir="$1"
+  assign_dir="$1"
 
-  # Init outputs
+  # Outputs
   : > "${assign_dir}/assignments.tsv"
   echo -e "read_id\tassigned_group\terrors\tmatched_len" > "${assign_dir}/assignments.tsv"
 
-  # Use a plain string instead of a bash array (portable)
-  local GROUPS="Archaea Ascomic Bac Basid"
+  # Plain string (not an array); avoids 'local' issues
+  GROUPS_STR="Archaea Ascomic Bac Basid"
 
-  # Temp unified table: read_id  group  errors  matched_len
-  local SCORES="${assign_dir}/_per_read_scores.tsv"
-  : > "${SCORES}"
+  # Unified scores table: read_id  group  errors  matched_len
+  SCORES_PATH="${assign_dir}/_per_read_scores.tsv"
+  : > "${SCORES_PATH}"
 
   # Collect per-group scores from cutadapt --info-file
-  for G in $GROUPS; do
-    local info="${assign_dir}"/*."${G}".info.txt
-    [[ -s $info ]] || continue
+  for G in $GROUPS_STR; do
+    info_glob="${assign_dir}"/*."${G}".info.txt
+    # if no match, skip
+    ls $info_glob >/dev/null 2>&1 || continue
 
-    awk -v G="$G" -F'\t' '
+    # If multiple info files somehow exist, cat them all
+    cat $info_glob | awk -v G="$G" -F'\t' '
       BEGIN{IGNORECASE=1}
       NR==1{
         for(i=1;i<=NF;i++){
@@ -206,33 +207,35 @@ _resolve_assignments() {
           print id "\t" G "\t" ev "\t" mlv
         }
       }
-    ' "$info" >> "${SCORES}"
+    ' >> "${SCORES_PATH}"
   done
 
   # If nothing to score, emit empty final files and return
-  [[ -s "${SCORES}" ]] || {
-    for G in $GROUPS; do : > "${assign_dir}/final.${G}.ids.txt"; done
+  if [[ ! -s "${SCORES_PATH}" ]]; then
+    for G in $GROUPS_STR; do : > "${assign_dir}/final.${G}.ids.txt"; done
     : > "${assign_dir}/assigned.ids.txt"
     return 0
-  }
+  fi
 
   # Ensure empty final files exist before we append to them
-  for G in $GROUPS; do : > "${assign_dir}/final.${G}.ids.txt"; done
+  for G in $GROUPS_STR; do : > "${assign_dir}/final.${G}.ids.txt"; done
 
   # Decide per read: fewest errors; tie -> longer match; still tie -> Unknown
-  awk -F'\t' -v OFS='\t' -v dir="${assign_dir}" '
+  awk -F'\t' -v OFS='\t' -v dir="${assign_dir}" -v groups="$GROUPS_STR" '
     {
       id=$1; g=$2; e=$3+0; ml=$4+0
-      if(!(id in bestE) || e < bestE[id] || (e == bestE[id] && ml > bestML[id])){
-        bestE[id]=e; bestML[id]=ml; bestG[id]=g; tie[id]=0
+      # track best seen
+      if( !(id in bestE) || e < bestE[id] || (e == bestE[id] && ml > bestML[id]) ){
+        bestE[id]=e; bestML[id]=ml; bestG[id]=g; ties[id]=0
       } else if (e == bestE[id] && ml == bestML[id] && g != bestG[id]) {
-        tie[id]=1
+        ties[id]=1
       }
+      seen[id]=1
     }
     END{
       out=dir "/assignments.tsv"
-      for(id in bestG){
-        if(tie[id]==1){
+      for(id in seen){
+        if(ties[id]==1){
           printf("%s\t%s\t%d\t%d\n", id, "Unknown", bestE[id], bestML[id]) >> out
         } else {
           printf("%s\t%s\t%d\t%d\n", id, bestG[id], bestE[id], bestML[id]) >> out
@@ -240,7 +243,7 @@ _resolve_assignments() {
         }
       }
     }
-  ' "${SCORES}"
+  ' "${SCORES_PATH}"
 }
 
 # ----------------------------------------------------------
