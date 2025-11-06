@@ -68,7 +68,7 @@ parse_primers() {
 cutadapt_primer_flags() {
   local flags=()
   for p in "${FORWARD_PRIMERS[@]}";  do flags+=( -g "^${p}" ); done
-  for p in "${REVERSE_PRIMERS[@]}";  do flags+=( -a "${p}\$" ); done
+  for p in "${REVERSE_PRIMERS[@]}";  do flags+=( -a "rc:${p}\$" ); done
   printf '%q ' "${flags[@]}"
 }
 
@@ -245,7 +245,7 @@ demux_by_primers() {
       cutadapt -j "${THREADS}" \
         --match-read-wildcards --revcomp \
         -e "${PRIMER_ERR}" --overlap "${OVL}" --no-trim \
-        -g "^${FWD}...rc(${REV})$" \
+        -g "^${FWD}...rc:${REV}$" \
         -o "$outF" \
         --untrimmed-output "$next" \
         "$rem" \
@@ -818,7 +818,7 @@ for GROUP in Archaea Ascomic Bac Basid Unknown; do
 
   # Update primer dirs to group-scoped locations
   PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
-  PRIMER_TRIM_DIR="${RESULTS}/primer_trimming}"
+  PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
 
   # Initial QC on raw data (per group)
   time_function run_fastqc_all
