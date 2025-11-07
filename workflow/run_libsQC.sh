@@ -457,45 +457,128 @@ build_fastq_meta() {
 }
 
 demux_by_primers() {
-  echo ">>> Demultiplexing (single-pass with all primers)..."
+  echo ">>> Demultiplexing (independent classification with tie-breaking)..."
   local groups_root="${RESULTS}/groups"
+  mkdir -p "${groups_root}"
 
   # Create output directories
   for group in Archaea Ascomic Bac Basid Unknown; do
     mkdir -p "${groups_root}/${group}/data"
+    mkdir -p "${groups_root}/${group}/matches"
   done
 
   for inF in "${FASTQ_FILES[@]}"; do
-    local bn="${inF##*/}"
-    local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
+    local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
+    local assign_dir="${groups_root}/_assign/${b}"; mkdir -p "${assign_dir}"
 
-    echo ">>> Processing $bn with all primer pairs..."
+    echo ">>> Phase 1: Independent classification of $bn across all groups..."
 
-    # Use cutadapt's built-in demultiplexing with explicit output files
-    cutadapt -j "${THREADS}" \
-      --match-read-wildcards \
-      --revcomp \
-      -e "${PRIMER_ERR}" \
-      --overlap 16 \
-      -g "Archaea=${PRIM_FWD_ARCHAEA}" \
-      -a "Archaea_rev=$(revcomp_seq "${PRIM_REV_ARCHAEA}")" \
-      -g "Ascomic=${PRIM_FWD_ASCOMIC}" \
-      -a "Ascomic_rev=$(revcomp_seq "${PRIM_REV_ASCOMIC}")" \
-      -g "Bac=${PRIM_FWD_BAC}" \
-      -a "Bac_rev=$(revcomp_seq "${PRIM_REV_BAC}")" \
-      -g "Basid=${PRIM_FWD_BASID}" \
-      -a "Basid_rev=$(revcomp_seq "${PRIM_REV_BASID}")" \
-      --untrimmed-output "${groups_root}/Unknown/data/${b}.Unknown.fastq.gz" \
-      -o "${groups_root}/Archaea/data/${b}.Archaea.fastq.gz" \
-      -o "${groups_root}/Ascomic/data/${b}.Ascomic.fastq.gz" \
-      -o "${groups_root}/Bac/data/${b}.Bac.fastq.gz" \
-      -o "${groups_root}/Basid/data/${b}.Basid.fastq.gz" \
-      "$inF"
+    # Run all group classifications in parallel
+    _classify_one_group "$inF" "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" 16 "${groups_root}/Archaea/matches" &
+    _classify_one_group "$inF" "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" 16 "${groups_root}/Ascomic/matches" &
+    _classify_one_group "$inF" "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     16 "${groups_root}/Bac/matches" &
+    _classify_one_group "$inF" "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   12 "${groups_root}/Basid/matches" &
+    wait
 
-    echo ">>> Completed demux for $bn"
+    # Copy results to assignment directory
+    for G in Archaea Ascomic Bac Basid; do
+      cp -f "${groups_root}/${G}/matches/${b}.${G}.info.txt" "${assign_dir}/" 2>/dev/null || :
+      cp -f "${groups_root}/${G}/matches/${b}.${G}.ids.txt"  "${assign_dir}/" 2>/dev/null || :
+    done
+
+    echo ">>> Resolving multi-group assignments with tie-breaking..."
+    _resolve_assignments "${assign_dir}"
+
+    echo ">>> Phase 2: Extracting and trimming final assignments..."
+
+    # Process each group
+    for G in Archaea Ascomic Bac Basid; do
+      local ids="${assign_dir}/final.${G}.ids.txt"
+      local outdir="${groups_root}/${G}/data"; mkdir -p "$outdir"
+      local outF="${outdir}/${b}.${G}.fastq.gz"
+
+      if [[ ! -s "${ids}" ]]; then
+        # Create empty file if no reads for this group
+        : > "${outF}"
+        continue
+      fi
+
+      # Extract this group's reads
+      if [[ "$inF" == *.gz ]]; then
+        zcat "$inF" | seqkit grep -n -f "${ids}" -w 0 | gzip > "${assign_dir}/${b}.${G}.subset.fastq.gz"
+      else
+        seqkit grep -n -f "${ids}" "$inF" | gzip > "${assign_dir}/${b}.${G}.subset.fastq.gz"
+      fi
+
+      # Trim this group
+      local FWD REV OVL
+      case "$G" in
+        Archaea) FWD="${PRIM_FWD_ARCHAEA}"; REV="${PRIM_REV_ARCHAEA}"; OVL=16 ;;
+        Ascomic) FWD="${PRIM_FWD_ASCOMIC}"; REV="${PRIM_REV_ASCOMIC}"; OVL=16 ;;
+        Bac)     FWD="${PRIM_FWD_BAC}";     REV="${PRIM_REV_BAC}";     OVL=16 ;;
+        Basid)   FWD="${PRIM_FWD_BASID}";   REV="${PRIM_REV_BASID}";   OVL=12 ;;
+      esac
+      local REV_RC; REV_RC="$(revcomp_seq "$REV")"
+
+      cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
+        --match-read-wildcards --revcomp \
+        -e "${PRIMER_ERR}" --overlap "${OVL}" \
+        -g "${FWD}" -a "${REV_RC}" \
+        --discard-untrimmed \
+        -o "${outF}" \
+        "${assign_dir}/${b}.${G}.subset.fastq.gz" > "${outF%.fastq.gz}.cutadapt_report.txt" 2>&1
+
+      rm -f "${assign_dir}/${b}.${G}.subset.fastq.gz"
+    done
+
+    # Unknown = everything not assigned
+    local outdirU="${groups_root}/Unknown/data"; mkdir -p "$outdirU"
+    local outU="${outdirU}/${b}.Unknown.fastq.gz"
+    local assigned_ids="${assign_dir}/assigned.ids.txt"
+
+    if [[ -s "${assigned_ids}" ]]; then
+      if [[ "$inF" == *.gz ]]; then
+        zcat "$inF" | seqkit grep -n -v -f "${assigned_ids}" -w 0 | gzip > "$outU"
+      else
+        seqkit grep -n -v -f "${assigned_ids}" "$inF" | gzip > "$outU"
+      fi
+    else
+      # no assigned reads -> all unknown
+      if [[ "$inF" == *.gz ]]; then
+        cp "$inF" "$outU"
+      else
+        gzip -c "$inF" > "$outU"
+      fi
+    fi
+
+    # Cleanup
+    if [[ "${KEEP_INFO:-0}" -eq 0 ]]; then
+      rm -f "${assign_dir}"/*.info.txt 2>/dev/null || true
+    fi
+
   done
 
-  echo ">>> Demux complete. See ${groups_root}/*/data/"
+  echo ">>> Independent classification complete. See ${groups_root}/*/data/"
+}
+
+# Classification function (same as your original)
+_classify_one_group() {
+  local inF="$1" grp="$2" FWD="$3" REV="$4" ovl="$5" outdir="$6"
+  mkdir -p "$outdir"
+  local base="${inF##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
+  local REV_RC; REV_RC="$(revcomp_seq "$REV")"
+
+  cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
+    --match-read-wildcards --revcomp \
+    -e "${PRIMER_ERR}" --overlap "${ovl}" \
+    -g "${FWD}" -a "${REV_RC}" \
+    --discard-untrimmed \
+    --info-file "${outdir}/${base}.${grp}.info.txt" \
+    -o /dev/null \
+    "$inF" > "${outdir}/${base}.${grp}.report.txt"
+
+  # Extract read IDs
+  awk 'NF && NR>1 {gsub(/\r/,""); print $1}' "${outdir}/${base}.${grp}.info.txt" > "${outdir}/${base}.${grp}.ids.txt" 2>/dev/null || true
 }
 
 run_fastqc_all() {
