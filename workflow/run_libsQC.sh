@@ -13,6 +13,7 @@ set -euo pipefail
 if ! command -v conda >/dev/null 2>&1; then
   for CAND in "$HOME/mambaforge" "$HOME/miniforge3" "$HOME/miniconda3" "/opt/conda"; do
     if [ -f "$CAND/etc/profile.d/conda.sh" ]; then
+      # shellcheck disable=SC1091
       source "$CAND/etc/profile.d/conda.sh"
       break
     fi
@@ -100,8 +101,7 @@ revcomp_seq() {
   }'
 }
 
-# --- Convenience: per-group primer pairs (FOR CLASSIFICATION) ------------
-# canonical group primer definitions for demultiplexing
+# --- Convenience: per-group primer pairs (FOR CLASSIFICATION / CHECKS) ------------
 PRIM_FWD_ARCHAEA="TTCCGGTTGATCCTGCCGGA"
 PRIM_REV_ARCHAEA="TACGGWTACCTTGTTACGACTT"
 
@@ -138,207 +138,55 @@ _ids_from_fastx() {
     | awk 'NF' > "$1"
 }
 
-# replace your _independent_match_one with this version
-_independent_match_one() {
-  local inF="$1" grp="$2" FWD="$3" REV="$4" ovl="$5" outdir="$6"
-  mkdir -p "$outdir"
-  local base="${inF##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
-  local REV_RC; REV_RC="$(revcomp_seq "$REV")"
-
-  # per-job cores (default 2); avoids oversubscribing when we parallelize groups
-  local CAD_CORES="${CUTADAPT_CORES_PER:-2}"
-
-  # we only need IDs + stats; send trimmed reads to /dev/null
-  cutadapt -j "${CAD_CORES}" \
-    --match-read-wildcards --revcomp \
-    -e "${PRIMER_ERR}" --overlap "${ovl}" \
-    -g "${FWD}" -a "${REV_RC}" \
-    --discard-untrimmed \
-    --info-file "${outdir}/${base}.${grp}.info.txt" \
-    -o /dev/null \
-    "$inF" > "${outdir}/${base}.${grp}.report.txt"
-
-  # extract read IDs seen in info.txt (faster than writing a kept FASTQ)
-  # cutadapt --info-file lines start with read id; strip CRs & blanks
-  awk 'NF{gsub(/\r/,""); print $1}' "${outdir}/${base}.${grp}.info.txt" > "${outdir}/${base}.${grp}.ids.txt"
+# =================================================================================
+# Single global primer trimming (no classification)
+#   - Trims using ALL known primers (Archaea/Ascomic/Bac/Basid) at once.
+#   - Does NOT discard untrimmed reads (keeps everything).
+#   - Output: results/trimmed/<sample>.trimmed.fastq.gz
+# =================================================================================
+set_all_primers_for_checks() {
+  # Build combined lists for later spotchecks / verification
+  PRIMER_FWD_LIST="$(printf "%s,%s,%s,%s" \
+    "$PRIM_FWD_ARCHAEA" "$PRIM_FWD_ASCOMIC" "$PRIM_FWD_BAC" "$PRIM_FWD_BASID")"
+  PRIMER_REV_LIST="$(printf "%s,%s,%s,%s" \
+    "$PRIM_REV_ARCHAEA" "$PRIM_REV_ASCOMIC" "$PRIM_REV_BAC" "$PRIM_REV_BASID")"
 }
 
-# helper—resolve assignments without stats:
-# - If a read ID appears in exactly ONE group => assign to that group
-# - If it appears in >1 groups => assign to Unknown (tie)
-# This avoids parsing cutadapt --info-file. Later we can enrich ties with stats.
-_resolve_assignments() {
-  assign_dir="$1"
+global_primer_trim() {
+  echo ">>> Global primer trimming across ALL groups (saving trimmed + untrimmed separately) ..."
+  mkdir -p "${RESULTS}/trimmed" "${RESULTS}/untrimmed" "${RESULTS}/trim_reports"
 
-  # init outputs
-  : > "${assign_dir}/assignments.tsv"
-  echo -e "read_id\tassigned_group\terrors\tmatched_len" > "${assign_dir}/assignments.tsv"
+  # Use ALL group primers for trimming
+  local FWD_ALL=( "$PRIM_FWD_ARCHAEA" "$PRIM_FWD_ASCOMIC" "$PRIM_FWD_BAC" "$PRIM_FWD_BASID" )
+  local REV_ALL=( "$PRIM_REV_ARCHAEA" "$PRIM_REV_ASCOMIC" "$PRIM_REV_BAC" "$PRIM_REV_BASID" )
 
-  GROUPS_STR="Archaea Ascomic Bac Basid"
+  for inF in "${FASTQ_FILES[@]}"; do
+    local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
+    local out_trim="${RESULTS}/trimmed/${b}.trimmed.fastq.gz"
+    local out_untrim="${RESULTS}/untrimmed/${b}.untrimmed.fastq.gz"
+    local rpt="${RESULTS}/trim_reports/${b}.cutadapt_report.txt"
 
-  # --- A) Load raw ID membership per group (unique assignment path) ---
-  # membership[read_id] = number of groups matched
-  # firstG[read_id]     = name of the (first) matching group; later we keep a list
-  : > "${assign_dir}/_all.ids.txt"
-
-  # Clear any stale final files
-  for G in $GROUPS_STR; do
-    : > "${assign_dir}/final.${G}.ids.txt"
-  done
-
-  # Build per-ID membership
-  awk '
-    { id=$0; if(id!=""){ gsub(/\r/,"",id); print id } }
-  ' /dev/null > /dev/null  # no-op to keep awk visible in some shells
-
-  # use awk to aggregate counts across all group id lists
-  awk -v OFS="\t" -v dir="${assign_dir}" '
-    function add(g,f,  cmd,id){
-      cmd = "cat " f " 2>/dev/null"
-      while((cmd | getline id) > 0){
-        if(id!=""){
-          gsub(/\r/,"",id)
-          seen[id]=1
-          groups[id]= (id in groups ? groups[id] "," g : g)
-          count[id]++
-        }
-      }
-      close(cmd)
-    }
-    END {
-      # nothing here; we call from shell
-    }
-  ' > /dev/null
-
-  # Populate membership using the shell; keep a unified list for later
-  for G in $GROUPS_STR; do
-    for F in "${assign_dir}"/*."${G}".ids.txt; do
-      [ -e "$F" ] || continue
-      cat "$F" >> "${assign_dir}/_all.ids.txt"
+    # Build flags: all FWD as -g; all reverse RC as -a
+    local flags=()
+    for fwd in "${FWD_ALL[@]}"; do flags+=( -g "${fwd}" ); done
+    for rev in "${REV_ALL[@]}"; do
+      local rc; rc="$(revcomp_seq "$rev")"
+      flags+=( -a "${rc}" )
     done
-  done
-  # unique list of any ID seen in any group
-  sort -u "${assign_dir}/_all.ids.txt" > "${assign_dir}/_all.unique.ids.txt" 2>/dev/null || true
 
-  # Build a simple TSV: id \t groups_csv \t count
-  : > "${assign_dir}/_membership.tsv"
-  awk -v dir="${assign_dir}" -v OFS="\t" '
-    BEGIN{
-      split("Archaea Ascomic Bac Basid", G, " ");
-      for(i=1;i<=length(G);i++){ g=G[i]; files[++nf] = dir "/*." g ".ids.txt" }
-      # load each group list
-      for(i=1;i<=nf;i++){
-        cmd = "cat " files[i] " 2>/dev/null"
-        split(files[i],parts,"."); gname=parts[length(parts)-1]  # grabs group from *.Group.ids.txt
-        while( (cmd|getline id) > 0 ){
-          if(id!=""){ gsub(/\r/,"",id); seen[id]=1; count[id]++; groupsCSV[id] = (id in groupsCSV ? groupsCSV[id] "," gname : gname) }
-        }
-        close(cmd)
-      }
-    }
-    END{
-      for(id in seen){
-        print id, (id in groupsCSV ? groupsCSV[id] : ""), (id in count ? count[id] : 0)
-      }
-    }
-  ' "${assign_dir}/_all.unique.ids.txt" > "${assign_dir}/_membership.tsv"
-
-  # --- B) Prepare per-group info streams (for tie-breaking with stats) ---
-  SCORES_PATH="${assign_dir}/_per_read_scores.tsv"
-  : > "${SCORES_PATH}"
-
-  for G in $GROUPS_STR; do
-    # Concatenate all info files of this group (if any)
-    have_any=0
-    for IF in "${assign_dir}"/*."${G}".info.txt; do
-      [ -e "$IF" ] || continue
-      have_any=1
-
-      # Parse the cutadapt info-file robustly
-      awk -v G="$G" -F'\t' '
-        BEGIN{IGNORECASE=1}
-        NR==1{
-          rn=err=ml=rs=re=0
-          for(i=1;i<=NF;i++){
-            f=$i
-            if(f ~ /^readname$|^name$|^read_name$/) rn=i
-            else if(f ~ /^errors?$/) err=i
-            else if(f ~ /^matched_len$|^match(?:ed)?_?length$|^adapter_length$/) ml=i
-            else if(f ~ /^rstart$/) rs=i
-            else if(f ~ /^rend$/)   re=i
-          }
-          next
-        }
-        {
-          id = (rn? $rn : $1)
-          ev = (err? $err+0 : 0)
-          mlv = 0
-          if(ml){ mlv = $ml+0 }
-          else if(rs && re){ mlv = ($re - $rs); if(mlv<0) mlv=0 }
-          if(id!=""){
-            gsub(/\r/,"",id)
-            print id "\t" G "\t" ev "\t" mlv
-          }
-        }
-      ' "$IF" >> "${SCORES_PATH}"
-    done
-    # if no info files for this group, just skip
-    [ $have_any -eq 1 ] || true
+    # One cutadapt pass: save trimmed AND untrimmed separately
+    cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
+      --match-read-wildcards --revcomp \
+      -e "${PRIMER_ERR}" \
+      "${flags[@]}" \
+      -o "${out_trim}" \
+      --untrimmed-output "${out_untrim}" \
+      "$inF" > "${rpt}" 2>&1
   done
 
-  # --- C) Decide per-read ---
-  # 1) Unique membership → assign immediately
-  # 2) Multi-group membership → use stats if available; else Unknown
-  #    Rule: lowest errors; tie → longest match; tie → Unknown
-  awk -F'\t' -v OFS='\t' -v dir="${assign_dir}" '
-    BEGIN{
-      # load scores if present
-      sc = dir "/_per_read_scores.tsv"
-      while( (getline < sc) > 0 ){
-        id=$1; g=$2; e=$3+0; ml=$4+0
-        # init
-        if( !(id in bestE) || e < bestE[id] || (e==bestE[id] && ml > bestML[id]) ){
-          bestE[id]=e; bestML[id]=ml; bestG[id]=g; ties[id]=0
-        } else if(e==bestE[id] && ml==bestML[id] && g!=bestG[id]) {
-          ties[id]=1
-        }
-      }
-      close(sc)
-      # prepare files
-      split("Archaea Ascomic Bac Basid", GG, " ")
-      for(i in GG){ g=GG[i]; finalF[g]=dir "/final." g ".ids.txt" }
-      assignF = dir "/assignments.tsv"
-    }
-    # membership rows: id  groups_csv  n
-    {
-      id=$1; csv=$2; n=$3+0
-      if(n==1){
-        # unique: take the single group (no stats needed)
-        split(csv,arr,","); g=arr[1]
-        print id >> finalF[g]
-        printf("%s\t%s\t%s\t%s\n", id, g, (id in bestE? bestE[id] : ""), (id in bestML? bestML[id] : "")) >> assignF
-      } else if(n>1){
-        if(id in bestG && ties[id]!=1){
-          g=bestG[id]
-          print id >> finalF[g]
-          printf("%s\t%s\t%d\t%d\n", id, g, bestE[id], bestML[id]) >> assignF
-        } else {
-          # tie after stats (or no stats) → Unknown
-          printf("%s\t%s\t%s\t%s\n", id, "Unknown", (id in bestE? bestE[id] : ""), (id in bestML? bestML[id] : "")) >> assignF
-        }
-      } else {
-        # n==0 should not happen; be conservative
-        printf("%s\t%s\t%s\t%s\n", id, "Unknown", "", "") >> assignF
-      }
-    }
-  ' "${assign_dir}/_membership.tsv"
-
-  # build assigned list (union of finals)
-  : > "${assign_dir}/assigned.ids.txt"
-  for G in $GROUPS_STR; do
-    [ -s "${assign_dir}/final.${G}.ids.txt" ] && cat "${assign_dir}/final.${G}.ids.txt" >> "${assign_dir}/assigned.ids.txt"
-  done
-  [ -s "${assign_dir}/assigned.ids.txt" ] && sort -u -o "${assign_dir}/assigned.ids.txt" "${assign_dir}/assigned.ids.txt" || : # may be empty
+  echo ">>> Global trimming complete."
+  echo "    Trimmed reads  -> ${RESULTS}/trimmed/"
+  echo "    Untrimmed reads -> ${RESULTS}/untrimmed/"
 }
 
 # ----------------------------------------------------------
@@ -454,131 +302,6 @@ build_fastq_meta() {
         fi
     done
     echo ">>> Manifest written: $out"
-}
-
-demux_by_primers() {
-  echo ">>> Demultiplexing (independent classification with tie-breaking)..."
-  local groups_root="${RESULTS}/groups"
-  mkdir -p "${groups_root}"
-
-  # Create output directories
-  for group in Archaea Ascomic Bac Basid Unknown; do
-    mkdir -p "${groups_root}/${group}/data"
-    mkdir -p "${groups_root}/${group}/matches"
-  done
-
-  for inF in "${FASTQ_FILES[@]}"; do
-    local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
-    local assign_dir="${groups_root}/_assign/${b}"; mkdir -p "${assign_dir}"
-
-    echo ">>> Phase 1: Independent classification of $bn across all groups..."
-
-    # Run all group classifications in parallel
-    _classify_one_group "$inF" "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" 16 "${groups_root}/Archaea/matches" &
-    _classify_one_group "$inF" "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" 16 "${groups_root}/Ascomic/matches" &
-    _classify_one_group "$inF" "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     16 "${groups_root}/Bac/matches" &
-    _classify_one_group "$inF" "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   12 "${groups_root}/Basid/matches" &
-    wait
-
-    # Copy results to assignment directory
-    for G in Archaea Ascomic Bac Basid; do
-      cp -f "${groups_root}/${G}/matches/${b}.${G}.info.txt" "${assign_dir}/" 2>/dev/null || :
-      cp -f "${groups_root}/${G}/matches/${b}.${G}.ids.txt"  "${assign_dir}/" 2>/dev/null || :
-    done
-
-    echo ">>> Resolving multi-group assignments with tie-breaking..."
-    _resolve_assignments "${assign_dir}"
-
-    echo ">>> Phase 2: Extracting and trimming final assignments..."
-
-    # Process each group
-    for G in Archaea Ascomic Bac Basid; do
-      local ids="${assign_dir}/final.${G}.ids.txt"
-      local outdir="${groups_root}/${G}/data"; mkdir -p "$outdir"
-      local outF="${outdir}/${b}.${G}.fastq.gz"
-
-      if [[ ! -s "${ids}" ]]; then
-        # Create empty file if no reads for this group
-        : > "${outF}"
-        continue
-      fi
-
-      # Extract this group's reads
-      if [[ "$inF" == *.gz ]]; then
-        zcat "$inF" | seqkit grep -n -f "${ids}" -w 0 | gzip > "${assign_dir}/${b}.${G}.subset.fastq.gz"
-      else
-        seqkit grep -n -f "${ids}" "$inF" | gzip > "${assign_dir}/${b}.${G}.subset.fastq.gz"
-      fi
-
-      # Trim this group
-      local FWD REV OVL
-      case "$G" in
-        Archaea) FWD="${PRIM_FWD_ARCHAEA}"; REV="${PRIM_REV_ARCHAEA}"; OVL=16 ;;
-        Ascomic) FWD="${PRIM_FWD_ASCOMIC}"; REV="${PRIM_REV_ASCOMIC}"; OVL=16 ;;
-        Bac)     FWD="${PRIM_FWD_BAC}";     REV="${PRIM_REV_BAC}";     OVL=16 ;;
-        Basid)   FWD="${PRIM_FWD_BASID}";   REV="${PRIM_REV_BASID}";   OVL=12 ;;
-      esac
-      local REV_RC; REV_RC="$(revcomp_seq "$REV")"
-
-      cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
-        --match-read-wildcards --revcomp \
-        -e "${PRIMER_ERR}" --overlap "${OVL}" \
-        -g "${FWD}" -a "${REV_RC}" \
-        --discard-untrimmed \
-        -o "${outF}" \
-        "${assign_dir}/${b}.${G}.subset.fastq.gz" > "${outF%.fastq.gz}.cutadapt_report.txt" 2>&1
-
-      rm -f "${assign_dir}/${b}.${G}.subset.fastq.gz"
-    done
-
-    # Unknown = everything not assigned
-    local outdirU="${groups_root}/Unknown/data"; mkdir -p "$outdirU"
-    local outU="${outdirU}/${b}.Unknown.fastq.gz"
-    local assigned_ids="${assign_dir}/assigned.ids.txt"
-
-    if [[ -s "${assigned_ids}" ]]; then
-      if [[ "$inF" == *.gz ]]; then
-        zcat "$inF" | seqkit grep -n -v -f "${assigned_ids}" -w 0 | gzip > "$outU"
-      else
-        seqkit grep -n -v -f "${assigned_ids}" "$inF" | gzip > "$outU"
-      fi
-    else
-      # no assigned reads -> all unknown
-      if [[ "$inF" == *.gz ]]; then
-        cp "$inF" "$outU"
-      else
-        gzip -c "$inF" > "$outU"
-      fi
-    fi
-
-    # Cleanup
-    if [[ "${KEEP_INFO:-0}" -eq 0 ]]; then
-      rm -f "${assign_dir}"/*.info.txt 2>/dev/null || true
-    fi
-
-  done
-
-  echo ">>> Independent classification complete. See ${groups_root}/*/data/"
-}
-
-# Classification function (same as your original)
-_classify_one_group() {
-  local inF="$1" grp="$2" FWD="$3" REV="$4" ovl="$5" outdir="$6"
-  mkdir -p "$outdir"
-  local base="${inF##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
-  local REV_RC; REV_RC="$(revcomp_seq "$REV")"
-
-  cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
-    --match-read-wildcards --revcomp \
-    -e "${PRIMER_ERR}" --overlap "${ovl}" \
-    -g "${FWD}" -a "${REV_RC}" \
-    --discard-untrimmed \
-    --info-file "${outdir}/${base}.${grp}.info.txt" \
-    -o /dev/null \
-    "$inF" > "${outdir}/${base}.${grp}.report.txt"
-
-  # Extract read IDs
-  awk 'NF && NR>1 {gsub(/\r/,""); print $1}' "${outdir}/${base}.${grp}.info.txt" > "${outdir}/${base}.${grp}.ids.txt" 2>/dev/null || true
 }
 
 run_fastqc_all() {
@@ -836,7 +559,7 @@ plot_fastq_length_boxplots() {
 verify_primer_removal() {
   parse_primers
   if [ ${#FORWARD_PRIMERS[@]} -eq 0 ] && [ ${#REVERSE_PRIMERS[@]} -eq 0 ]; then
-    echo ">>> verify_primer_removal: skipped (no primers for this group)"
+    echo ">>> verify_primer_removal: skipped (no primers for this dataset)"
     return 0
   fi
   echo ">>> Verifying primer removal ..."
@@ -868,84 +591,14 @@ verify_primer_removal() {
 
 # helper to aggregate per-group length tables to the legacy top-level path
 aggregate_group_lengths() {
-  echo ">>> Aggregating per-group length tables into legacy combined files ..."
-  mkdir -p results/lengths
-
-  #build BOTH pre and post combined TSVs from results/groups/<GROUP>/lengths
-  local out_pre="results/lengths/all_lengths.tsv"
-  local out_post="results/lengths/all_lengths_post.tsv"
-  echo -e "sample\tlength" > "$out_pre"
-  echo -e "sample\tlength" > "$out_post"
-
-  local found_pre=0
-  local found_post=0
-
-  for g in Archaea Ascomic Bac Basid Unknown; do
-    local d="results/groups/${g}/lengths"
-
-    # PRE
-    if [ -s "${d}/all_lengths.tsv" ]; then
-      awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths.tsv" >> "$out_pre"
-      echo "    PRE: included ${d}/all_lengths.tsv"
-      found_pre=1
-    fi
-
-    # POST
-    if [ -s "${d}/all_lengths_post.tsv" ]; then
-      awk -v grp="$g" 'NR>1{print grp "/" $1 "\t" $2}' "${d}/all_lengths_post.tsv" >> "$out_post"
-      echo "    POST: included ${d}/all_lengths_post.tsv"
-      found_post=1
-    fi
-  done
-
-  if [ "$found_pre" -eq 1 ]; then
-    echo ">>> Wrote results/lengths/all_lengths.tsv"
-  else
-    echo "!!! No group PRE length tables found — results/lengths/all_lengths.tsv is empty."
-  fi
-
-  if [ "$found_post" -eq 1 ]; then
-    echo ">>> Wrote results/lengths/all_lengths_post.tsv"
-  else
-    echo "!!! No group POST length tables found — results/lengths/all_lengths_post.tsv is empty."
-  fi
+  # <<< DISABLED (no per-group demux anymore). Keeping function harmless.
+  echo ">>> aggregate_group_lengths skipped (no per-group lengths)"
 }
 
 #helper to render combined PRE and POST plots after aggregation
 render_combined_plots() {
-  if [ ! -f workflow/plot_fastq_lengths.R ]; then
-    echo "!!! Missing workflow/plot_fastq_lengths.R — cannot render combined plots."
-    return 1
-  fi
-  mkdir -p results/lengths
-
-  # PRE
-  if [ -s results/lengths/all_lengths.tsv ]; then
-    echo ">>> Rendering combined PRE plot ..."
-    Rscript workflow/plot_fastq_lengths.R
-    mv -f results/lengths/read_length_boxplots.png results/lengths/read_length_boxplots_pre.png || true
-    mv -f results/lengths/read_length_boxplots.pdf results/lengths/read_length_boxplots_pre.pdf || true
-  else
-    echo ">>> Skipping PRE plot (no results/lengths/all_lengths.tsv)"
-  fi
-
-  # POST
-  if [ -s results/lengths/all_lengths_post.tsv ]; then
-    echo ">>> Rendering combined POST plot ..."
-    cp -f results/lengths/all_lengths_post.tsv results/lengths/all_lengths.tsv
-    Rscript workflow/plot_fastq_lengths.R
-    mv -f results/lengths/read_length_boxplots.png results/lengths/read_length_boxplots_post.png || true
-    mv -f results/lengths/read_length_boxplots.pdf results/lengths/read_length_boxplots_post.pdf || true
-    # restore PRE table if it existed (harmless if absent)
-    if [ -s results/lengths/all_lengths_pre.tsv ]; then
-      cp -f results/lengths/all_lengths_pre.tsv results/lengths/all_lengths.tsv || true
-    else
-      # or restore the aggregated PRE file if it's still there
-      cp -f results/lengths/all_lengths_post.tsv results/lengths/all_lengths.tsv >/dev/null 2>&1 || true
-    fi
-  else
-    echo ">>> Skipping POST plot (no results/lengths/all_lengths_post.tsv)"
-  fi
+  # <<< DISABLED (no aggregation step in global mode)
+  echo ">>> render_combined_plots skipped (global mode)"
 }
 
 # ----------------------------------------------------------
@@ -998,47 +651,8 @@ time_function() {
 
 #single-function runner (optional mode)
 single_function_runner() {
-  local fn="$1"                # name of the bash function to call
-  local label="${LABEL:-pre}"  # e.g., pre or post for plotting
-  echo ">>> SINGLE-FUNCTION MODE: ${fn}  (LABEL=${label})"
-
-  # we assume demultiplexing already done; operate on existing groups
-  for GROUP in Archaea Ascomic Bac Basid Unknown; do
-    echo
-    echo "================= GROUP: ${GROUP} (ONLY_FN=${fn}) ================="
-    RESULTS="results/groups/${GROUP}"
-    PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
-    PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
-
-    # pick inputs per function/label
-    shopt -s nullglob
-    if [[ "${fn}" == "plot_fastq_length_boxplots" ]]; then
-      # For plotting: PRE uses raw group data; POST uses filtered
-      if [[ "${label}" == "post" ]]; then
-        FASTQ_FILES=( "${RESULTS}/filtered/"*.fastq.gz )
-      else
-        FASTQ_FILES=( "${RESULTS}/data/"*.fastq.gz )
-      fi
-    else
-      # generic: operate on raw group data
-      FASTQ_FILES=( "${RESULTS}/data/"*.fastq.gz )
-    fi
-    shopt -u nullglob
-
-    if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
-      echo ">>> No FASTQs for ${GROUP} matching this mode; skipping."
-      continue
-    fi
-
-    # group-scoped out dir for plotting
-    if [[ "${fn}" == "plot_fastq_length_boxplots" ]]; then
-      time_function "${fn} ${label} results/groups/${GROUP}/lengths"
-    else
-      # call the function without extra args
-      time_function "${fn}"
-    fi
-  done
-
+  # <<< DISABLED (kept for reference; global mode processes once)
+  echo ">>> SINGLE-FUNCTION MODE is disabled in global mode."
 }
 
 # ==========================================================
@@ -1059,63 +673,36 @@ time_function gather_fastq_files
 # only process first 3 files
 time_function limit_to_three_fastqs
 
-# 3) CLASSIFY reads into groups
-time_function demux_by_primers
+# Prepare combined primer lists for checks/reporting
+set_all_primers_for_checks
 
-# ===== Per-group processing loop ==========================================
-# run all subsequent steps per group
-# honor requested order (+Unknown at the end)
-for GROUP in $(groups_in_order) Unknown; do
+# Single global primer trimming (no classification)
+time_function global_primer_trim
 
-  echo
-  echo "================= GROUP: ${GROUP} ================="
+# From here on, operate on globally trimmed reads
+FASTQ_FILES=( "${RESULTS}/trimmed/"*.fastq.gz )
 
-  # Set results root for this group
-  RESULTS="results/groups/${GROUP}"
+# Initial QC on trimmed data
+time_function run_fastqc_all
+time_function run_multiqc
 
-  # Pick the group's FASTQs as input for this round
-  shopt -s nullglob
-  if [[ "$GROUP" == "Unknown" ]]; then
-    FASTQ_FILES=( "results/groups/${GROUP}/data/"*.fastq.gz )
-  else
-    FASTQ_FILES=( "results/groups/${GROUP}/data/"*.fastq.gz )
-  fi
-  shopt -u nullglob
+# Nanopore-specific QC (pre-filter)
+time_function 'quick_len_qual_overview pre'
+time_function primer_spotcheck
 
-  if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
-    echo ">>> No reads for group ${GROUP}; skipping."
-    continue
-  fi
+# Summaries and QC flags
+time_function make_fastq_summary
+time_function qc_flags_from_nanoplot
+time_function "plot_fastq_length_boxplots pre ${RESULTS}/lengths"
 
-  # Set group-specific primer lists for checks & trimming
-  case "$GROUP" in
-    Archaea) PRIMER_FWD_LIST="${PRIM_FWD_ARCHAEA}"; PRIMER_REV_LIST="${PRIM_REV_ARCHAEA}" ;;
-    Ascomic) PRIMER_FWD_LIST="${PRIM_FWD_ASCOMIC}"; PRIMER_REV_LIST="${PRIM_REV_ASCOMIC}" ;;
-    Bac)     PRIMER_FWD_LIST="${PRIM_FWD_BAC}";     PRIMER_REV_LIST="${PRIM_REV_BAC}"     ;;
-    Basid)   PRIMER_FWD_LIST="${PRIM_FWD_BASID}";   PRIMER_REV_LIST="${PRIM_REV_BASID}"   ;;
-    Unknown) PRIMER_FWD_LIST=""; PRIMER_REV_LIST="";;
-  esac
+# Length/Q filtering (globally)
+time_function filter_amplicons
 
-  PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
-  PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
+# Verify primer removal post-filter (uses the combined primers)
+time_function verify_primer_removal
 
-  # Initial QC on raw data (per group)
-  time_function run_fastqc_all
-  time_function run_multiqc
-
-  # Nanopore-specific QC (pre-filter)
-  time_function 'quick_len_qual_overview pre'
-  time_function primer_spotcheck
-
-  # Summaries and QC flags
-  time_function make_fastq_summary
-  time_function qc_flags_from_nanoplot
-  time_function "plot_fastq_length_boxplots pre results/groups/${GROUP}/lengths"
-
-  time_function filter_amplicons
-  time_function verify_primer_removal
-  time_function re_qc_filtered
-done
+# Re-QC filtered
+time_function re_qc_filtered
 
 #Final report
 log_run_report
