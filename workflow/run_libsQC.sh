@@ -457,7 +457,7 @@ build_fastq_meta() {
 }
 
 demux_by_primers() {
-  echo ">>> Optimized Demultiplexing..."
+  echo ">>> Demultiplexing (single-pass with all primers)..."
   local groups_root="${RESULTS}/groups"
 
   # Create output directories
@@ -465,55 +465,33 @@ demux_by_primers() {
     mkdir -p "${groups_root}/${group}/data"
   done
 
-  # Define primer pairs
-  declare -A FWD_PRIMERS=(
-    [Archaea]="${PRIM_FWD_ARCHAEA}"
-    [Ascomic]="${PRIM_FWD_ASCOMIC}"
-    [Bac]="${PRIM_FWD_BAC}"
-    [Basid]="${PRIM_FWD_BASID}"
-  )
-  declare -A REV_PRIMERS=(
-    [Archaea]="${PRIM_REV_ARCHAEA}"
-    [Ascomic]="${PRIM_REV_ASCOMIC}"
-    [Bac]="${PRIM_REV_BAC}"
-    [Basid]="${PRIM_REV_BASID}"
-  )
-
   for inF in "${FASTQ_FILES[@]}"; do
     local bn="${inF##*/}"
     local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
 
-    echo ">>> Processing $bn..."
+    echo ">>> Processing $bn with all primer pairs..."
 
-    # Create a combined unknown file that we'll subtract from
-    local unknown_file="${groups_root}/Unknown/data/${b}.Unknown.fastq.gz"
+    # Use cutadapt's built-in demultiplexing with explicit output files
+    cutadapt -j "${THREADS}" \
+      --match-read-wildcards \
+      --revcomp \
+      -e "${PRIMER_ERR}" \
+      --overlap 16 \
+      -g "Archaea=${PRIM_FWD_ARCHAEA}" \
+      -a "Archaea_rev=$(revcomp_seq "${PRIM_REV_ARCHAEA}")" \
+      -g "Ascomic=${PRIM_FWD_ASCOMIC}" \
+      -a "Ascomic_rev=$(revcomp_seq "${PRIM_REV_ASCOMIC}")" \
+      -g "Bac=${PRIM_FWD_BAC}" \
+      -a "Bac_rev=$(revcomp_seq "${PRIM_REV_BAC}")" \
+      -g "Basid=${PRIM_FWD_BASID}" \
+      -a "Basid_rev=$(revcomp_seq "${PRIM_REV_BASID}")" \
+      --untrimmed-output "${groups_root}/Unknown/data/${b}.Unknown.fastq.gz" \
+      -o "${groups_root}/Archaea/data/${b}.Archaea.fastq.gz" \
+      -o "${groups_root}/Ascomic/data/${b}.Ascomic.fastq.gz" \
+      -o "${groups_root}/Bac/data/${b}.Bac.fastq.gz" \
+      -o "${groups_root}/Basid/data/${b}.Basid.fastq.gz" \
+      "$inF"
 
-    # Start with all reads in unknown
-    cp "$inF" "$unknown_file"
-
-    # Extract each group sequentially from the unknown file
-    for group in Archaea Ascomic Bac Basid; do
-      local fwd="${FWD_PRIMERS[$group]}"
-      local rev="${REV_PRIMERS[$group]}"
-      local rev_rc=$(revcomp_seq "$rev")
-      local output="${groups_root}/${group}/data/${b}.${group}.fastq.gz"
-      local temp_unknown="${groups_root}/Unknown/data/${b}.Unknown.temp.fastq.gz"
-
-      cutadapt -j "${THREADS}" \
-        --match-read-wildcards \
-        --revcomp \
-        -e "${PRIMER_ERR}" \
-        --overlap 16 \
-        -g "$fwd" \
-        -a "$rev_rc" \
-        -o "$output" \
-        --untrimmed-output "$temp_unknown" \
-        "$unknown_file"
-
-      # Update unknown file for next iteration
-      mv "$temp_unknown" "$unknown_file"
-    done
-    
     echo ">>> Completed demux for $bn"
   done
 
