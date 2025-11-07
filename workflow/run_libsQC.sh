@@ -13,7 +13,6 @@ set -euo pipefail
 if ! command -v conda >/dev/null 2>&1; then
   for CAND in "$HOME/mambaforge" "$HOME/miniforge3" "$HOME/miniconda3" "/opt/conda"; do
     if [ -f "$CAND/etc/profile.d/conda.sh" ]; then
-      # shellcheck disable=SC1091
       source "$CAND/etc/profile.d/conda.sh"
       break
     fi
@@ -38,7 +37,7 @@ PRIMER_REV_LIST="${PRIMER_REV_LIST:-$PRIMER_REV}"   # CSV or single value
 RESULTS="${RESULTS:-results}"
 
 PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
-PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
+# PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
 
 # If runall.sh exported primer list files, read them, uppercase, and
 # convert to CSV so parse_primers() below can consume them.
@@ -101,7 +100,7 @@ revcomp_seq() {
   }'
 }
 
-# --- Convenience: per-group primer pairs (FOR CLASSIFICATION / CHECKS) ------------
+# --- Convenience: per-group primer pairs (FOR CHECKING) ------------
 PRIM_FWD_ARCHAEA="TTCCGGTTGATCCTGCCGGA"
 PRIM_REV_ARCHAEA="TACGGWTACCTTGTTACGACTT"
 
@@ -275,7 +274,7 @@ gather_fastq_files() {
     echo ">>> Found ${#FASTQ_FILES[@]} FASTQ files."
 }
 
-# limit to the first 3 fastqs as requested
+# limit to the first 3 fastqs
 limit_to_three_fastqs() {
     if [ ${#FASTQ_FILES[@]} -gt 3 ]; then
         echo ">>> Limiting to first 3 FASTQs as requested."
@@ -330,7 +329,7 @@ quick_len_qual_overview() {
         set +e
         NanoStat --fastq "$f" --threads "${THREADS}" \
           --outdir "${RESULTS}/nanostat/${base}.stat" \
-          --name "${base}" >/dev/null
+          --name "${base}" >/devnull
         set -e
     done
 
@@ -390,7 +389,8 @@ primer_spotcheck() {
 
 filter_amplicons() {
   echo ">>> Global length + Q filtering ..."
-  mkdir -p "${RESULTS}/filtered" "${PRIMER_TRIM_DIR}"
+  mkdir -p "${RESULTS}/filtered"
+  # mkdir -p "${PRIMER_TRIM_DIR}"
 
   local MEANQ="${MEANQ:-10}"
   local LEN_MIN="${LEN_MIN:-200}"
@@ -670,13 +670,12 @@ time_function export_env
 
 # Input discovery
 time_function gather_fastq_files
-# only process first 3 files
-time_function limit_to_three_fastqs
+# time_function limit_to_three_fastqs
 
 # Prepare combined primer lists for checks/reporting
 set_all_primers_for_checks
 
-# Single global primer trimming (no classification)
+# === Stage 1: Single global primer trimming (no classification)
 time_function global_primer_trim
 
 # ----------------------------------------------------------
@@ -692,26 +691,22 @@ fi
 printf ">>> Found %d trimmed FASTQs:\n" "${#FASTQ_FILES[@]}"
 printf "    %s\n" "${FASTQ_FILES[@]}"
 
-# Initial QC on trimmed data
+# === Stage 2: QC on trimmed data (no primer checking here) ===
 time_function run_fastqc_all
 time_function run_multiqc
-
-# Nanopore-specific QC (pre-filter)
 time_function 'quick_len_qual_overview pre'
-time_function primer_spotcheck
+#time_function primer_spotcheck
 
-# Summaries and QC flags
+# Summaries and QC flags (still on trimmed reads)
 time_function make_fastq_summary
 time_function qc_flags_from_nanoplot
 time_function "plot_fastq_length_boxplots pre ${RESULTS}/lengths"
 
-# Length/Q filtering (globally)
+# === Stage 3: Length/Q filtering (globally)
 time_function filter_amplicons
 
-# Verify primer removal post-filter (uses the combined primers)
-time_function verify_primer_removal
-
-# Re-QC filtered
+# === Stage 4: Post-filter QC
+# time_function verify_primer_removal
 time_function re_qc_filtered
 
 #Final report
