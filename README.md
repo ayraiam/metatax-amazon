@@ -81,32 +81,41 @@ EMU OPTIONS
 If ITS/LSU DBs are not provided, only the 16S step will be performed.
 The 16S Emu database (bacteria + archaea) is auto-downloaded at first use.
 
+<pre>
 EXAMPLES
 ---------
-# 1) Run both stages (QC + Emu, default settings)
+# 1) Run both stages (QC + Emu) with default settings
 bash workflow/runall.sh
 
-# 2) Run both with custom resources
+# 2) Run both stages with custom resources
 bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
 
-# 3) Run only QC
+# 3) Run only the QC stage
 bash workflow/runall.sh --no-emu --time 08:00:00 --cpus 16 --mem 32G
 
-# 4) Run only Emu (assuming QC already done)
+# 4) Run only Emu (QC already done)
+#    By default, runs on the first 3 FASTQs for quick testing.
+bash workflow/runall.sh --no-qc --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
+
+# 5) Run Emu on ALL FASTQs (disable test limit)
 LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
 
-# 5) Run both, giving Emu more resources
+# 6) Run both stages but allocate more resources to Emu
 bash workflow/runall.sh \
   --time 06:00:00 --cpus 8 --mem 32G \
   --emu-time 12:00:00 --emu-cpus 16 --emu-mem 64G
 
-# 6) Run Emu with ITS DB
+# 7) Run Emu with a custom ITS database
 bash workflow/runall.sh --no-qc --emu-db-its /path/to/emu_unite_its
 
-# 7) Run Emu with LSU DB
+# 8) Run Emu with a custom LSU database
 bash workflow/runall.sh --no-qc --emu-db-lsu /path/to/emu_silva_lsu
-</pre>
 
+# 9) Run Emu on a different FASTQ directory (skip QC)
+FASTQ_DIR_DEFAULT=/path/to/custom_filtered \
+bash workflow/runall.sh --no-qc --emu-time 10:00:00 --emu-cpus 12 --emu-mem 32G
+</pre>
+  
 <pre>
 OUTPUTS [TO BE UPDATED]
 -------
