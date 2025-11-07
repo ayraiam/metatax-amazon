@@ -470,16 +470,19 @@ demux_by_primers() {
     local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
 
     echo ">>> Processing $bn with single-pass demux..."
-
+    
     cutadapt -j "${THREADS}" \
       --match-read-wildcards --revcomp \
       -e "${PRIMER_ERR}" \
-      -g "Archaea=${PRIM_FWD_ARCHAEA};revcomp=${PRIM_REV_ARCHAEA}" \
-      -g "Ascomic=${PRIM_FWD_ASCOMIC};revcomp=${PRIM_REV_ASCOMIC}" \
-      -g "Bac=${PRIM_FWD_BAC};revcomp=${PRIM_REV_BAC}" \
-      -g "Basid=${PRIM_FWD_BASID};revcomp=${PRIM_REV_BASID}" \
+      -g "Archaea=${PRIM_FWD_ARCHAEA}" \
+      -a "Archaea_rev=$(revcomp_seq "${PRIM_REV_ARCHAEA}")" \
+      -g "Ascomic=${PRIM_FWD_ASCOMIC}" \
+      -a "Ascomic_rev=$(revcomp_seq "${PRIM_REV_ASCOMIC}")" \
+      -g "Bac=${PRIM_FWD_BAC}" \
+      -a "Bac_rev=$(revcomp_seq "${PRIM_REV_BAC}")" \
+      -g "Basid=${PRIM_FWD_BASID}" \
+      -a "Basid_rev=$(revcomp_seq "${PRIM_REV_BASID}")" \
       --overlap 16 \
-      --no-trim \
       --untrimmed-output "${groups_root}/Unknown/data/${b}.Unknown.fastq.gz" \
       -o "${groups_root}/{name}/data/${b}.{name}.fastq.gz" \
       "$inF"
