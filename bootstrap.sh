@@ -49,26 +49,27 @@ else
   echo ">>> Environment 'libsQC' already exists."
 fi
 
-# # ----------------------------------------------------------
-# # 4) (Optional) Create the 'emu-env' environment if missing
-# # ----------------------------------------------------------
-# # <<< ADDED (supports Emu pipeline right away)
-# if ! $MAMBA env list | grep -qE '^emu-env\s'; then
-#   if [ -f envs/emu-env.yml ]; then
-#     echo ">>> Creating environment 'emu-env' from envs/emu-env.yml..."
-#     $MAMBA env create -f envs/emu-env.yml
-#   else
-#     echo ">>> No envs/emu-env.yml found. The run_emu_amplicons.sh script will create it automatically later."
-#   fi
-# else
-#   echo ">>> Environment 'emu-env' already exists."
-# fi
+# ----------------------------------------------------------
+# 4) Create the 'emu-env' environment if missing
+# ----------------------------------------------------------
+if ! $MAMBA env list | grep -qE '^emu-env\s'; then
+  if [ -f envs/emu-env.yml ]; then
+    echo ">>> Creating environment 'emu-env' from envs/emu-env.yml..."
+    $MAMBA env create -f envs/emu-env.yml
+  else
+    echo ">>> No envs/emu-env.yml found. The run_emu_amplicons.sh script will create it automatically later."
+  fi
+else
+  echo ">>> Environment 'emu-env' already exists."
+fi
 
 # ----------------------------------------------------------
 # 5) Done
 # ----------------------------------------------------------
 echo ">>> Bootstrap complete!"
 echo ">>> You can now run either:"
-echo "      bash workflow/runall.sh           # libsQC (Slurm submission)"
+echo "      bash workflow/runall.sh           # <<< CHANGED: QC (libsQC) + Emu via Slurm"
 echo "   or"
-echo "      bash workflow/run_emu_amplicons.sh # Emu classification stage"
+echo "      bash workflow/runall.sh --no-qc   # <<< CHANGED: Emu only (assumes results/filtered exists)"
+
+
