@@ -334,90 +334,102 @@ collate_emu_outputs() {
     local base
     base=$(basename "$d")
 
-    # ------------------- ABUNDANCE PARSE -------------------
+    # ----------------------------
+    # Abundance table (robust header detection)
+    # ----------------------------
     if [ -s "${d}/abundance.tsv" ]; then
-      # accept tab or comma; accept case-insensitive headers
-      awk -v b="$base" -F'[,\t]' '
-        BEGIN{OFS="\t"; IGNORECASE=1}
-        NR==1{
-          for(i=1;i<=NF;i++){
-            if($i~/^rank$/) R=i;
-            else if($i~/^taxon$/) T=i;
-            else if($i~/^abundance/) A=i;
-            else if($i~/^count$/) C=i;
+      # Append only data rows (skip header) if at least one non-empty line exists
+      if awk 'NR>1 && NF>0 {exit 0} END{exit 1}' "${d}/abundance.tsv"; then
+        awk -v b="$base" -F'\t' '
+          BEGIN{OFS="\t"}
+          NR==1{
+            # <<< CHANGED: detect multiple possible header names (case-insensitive)
+            for(i=1;i<=NF;i++){
+              h=tolower($i)
+              if(h=="rank" || h=="level" || h=="taxlevel") R=i                   # <<< CHANGED
+              else if(h=="taxon" || h=="name" || h=="taxonomy" || h=="clade_name" || h=="lineage" || h=="species") T=i  # <<< CHANGED
+              else if(h ~ /^abundance/ || h=="relative_abundance" || h=="rel_abundance" || h=="fraction" || h=="prop" || h=="proportion") A=i  # <<< CHANGED
+              else if(h=="count" || h=="reads" || h=="read_count" || h=="assigned" || h=="num_reads") C=i  # <<< CHANGED
+            }
+            next
           }
-          next
-        }
-        # guard against short lines
-        NF>0 {print b, (R? $R:""), (T? $T:""), (A? $A:""), (C? $C:"")}
-      ' "${d}/abundance.tsv" >> "$abund_out"
+          NF>0 {
+            # If any field is missing, print empty string for it
+            print b, (R? $R:""), (T? $T:""), (A? $A:""), (C? $C:"")
+          }
+        ' "${d}/abundance.tsv" >> "$abund_out"
+      else
+        warn "Standardized abundance file exists but has no data rows: ${d}/abundance.tsv"
+      fi
     else
-      warn "Missing standardized abundance file at ${d}/abundance.tsv — Emu may have produced no matches or wrote an unexpected format."  
+      warn "Missing standardized abundance file at ${d}/abundance.tsv — Emu may have produced no matches or wrote an unexpected format."
     fi
 
-    # ------------------- MAPPING STATS ---------------------
-    # Prefer our recorded input total; fallback later if missing
-    total=$(awk 'NR==2{print $2; exit}' "${d}/../${base}/input_reads.tsv" 2>/dev/null || echo 0)
+    # ----------------------------
+    # Mapping / assignment stats
+    # ----------------------------
+    total=$(awk 'NR==2{print $2; exit}' "${d}/input_reads.tsv" 2>/dev/null || echo 0)
 
-    # robust assigned/unassigned from abundance.tsv (primary)
     assigned=0
     unclassified=0
-    if [ -s "${d}/abundance.tsv" ]; then
-      # Sum "count" where taxon != Unclassified (case-insensitive)
-      assigned=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
-        NR==1{
-          for(i=1;i<=NF;i++){ if($i~/^taxon$/) T=i; if($i~/^count$/) C=i }
-          next
-        }
-        (T && C) {
-          t=$T; gsub(/^ *| *$/,"",t)
-          if(t ~ /^unclassified$/) uc+=$C+0; else asg+=$C+0
-        }
-        END{ if(asg=="") asg=0; print asg }' "${d}/abundance.tsv")
-      unclassified=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
-        NR==1{
-          for(i=1;i<=NF;i++){ if($i~/^taxon$/) T=i; if($i~/^count$/) C=i }
-          next
-        }
-        (T && C) {
-          t=$T; gsub(/^ *| *$/,"",t)
-          if(t ~ /^unclassified$/) uc+=$C+0
-        }
-        END{ if(uc=="") uc=0; print uc }' "${d}/abundance.tsv")
-    fi
 
-    # fallback to read_assignments (either name) if abundance counts absent
-    if [ "$assigned" -eq 0 ]; then
-      if   [ -s "${d}/read_assignments.tsv" ]; then
-        assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read_assignments.tsv")
-      elif [ -s "${d}/read-assignments.tsv" ]; then
-        assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read-assignments.tsv")
+    if [ -s "${d}/read_assignments.tsv" ]; then
+      assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read_assignments.tsv")
+    elif [ -s "${d}/counts.tsv" ]; then
+      unclassified=$(awk -F'\t' 'tolower($1)=="unclassified"{print $2+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
+      assigned=$(awk -F'\t' 'NR>1 && tolower($1)!="unclassified"{s+=$2} END{print s+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
+      [ "$total" -gt 0 ] || total=$((assigned + unclassified))
+    elif [ -s "${d}/abundance.tsv" ]; then
+      # last-resort assignment derivation from abundance.tsv
+      # 1) try to sum a "count-like" column if present
+      mapfile -t counts_info < <(
+        awk -F'\t' '
+          BEGIN{OFS="\t"; haveCount=0}
+          NR==1{
+            for(i=1;i<=NF;i++){
+              h=tolower($i)
+              if(h=="taxon" || h=="name" || h=="taxonomy" || h=="clade_name" || h=="lineage" || h=="species") t=i
+              if(h=="count" || h=="reads" || h=="read_count" || h=="assigned" || h=="num_reads"){ c=i; haveCount=1 }
+              if(h ~ /^abundance/ || h=="relative_abundance" || h=="rel_abundance" || h=="fraction" || h=="prop" || h=="proportion") a=i
+            }
+            next
+          }
+          NF>0 {
+            tax=(t? tolower($t) : "")
+            if(haveCount){
+              if(tax!="unclassified") s_count+=$c; else u_count+=$c
+            }
+            if(a){ s_abund+=$a }  # sum of abundance if available
+          }
+          END{
+            if(haveCount){ printf "COUNT\t%d\t%d\n", s_count+0, u_count+0 }
+            else if(a){    printf "ABUND\t%.12f\t0\n", (s_abund+0) }  # ABUND flag with sum of abund (unit unknown)
+            else{          print "NONE" }
+          }
+        ' "${d}/abundance.tsv"
+      )
+      if [ "${counts_info[0]:-}" = "NONE" ] || [ -z "${counts_info[0]:-}" ]; then
+        assigned=0; unclassified=0
+      else
+        mode=$(echo "${counts_info[0]}" | cut -f1)
+        if [ "$mode" = "COUNT" ]; then
+          assigned=$(echo "${counts_info[0]}" | cut -f2)
+          unclassified=$(echo "${counts_info[0]}" | cut -f3)
+          [ "$total" -gt 0 ] || total=$((assigned + unclassified))
+        else
+          # Mode ABUND: infer assigned from total * sum(relative_abundance)
+          sum_abund=$(echo "${counts_info[0]}" | cut -f2)
+          # If sum_abund > 1, assume it is in percent
+          assigned=$(awk -v t="$total" -v s="$sum_abund" 'BEGIN{
+            if(t<=0){print 0; exit}
+            if(s>1.5){printf "%d", int(t*(s/100)+0.5)} else {printf "%d", int(t*s+0.5)}
+          }')
+        fi
       fi
     fi
 
-    # final fallback to counts.tsv if still zero/unknown
-    if [ "$assigned" -eq 0 ] && [ -s "${d}/counts.tsv" ]; then
-      unclassified=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
-        NR==1{for(i=1;i<=NF;i++){if($i~/^taxon$/) T=i; if($i~/^count$/) C=i}; next}
-        (T && C) { if(tolower($T)=="unclassified") uc+=$C+0 }
-        END{ if(uc=="") uc=0; print uc }' "${d}/counts.tsv")
-      assigned=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
-        NR==1{for(i=1;i<=NF;i++){if($i~/^taxon$/) T=i; if($i~/^count$/) C=i}; next}
-        (T && C) { if(tolower($T)!="unclassified") asg+=$C+0 }
-        END{ if(asg=="") asg=0; print asg }' "${d}/counts.tsv")
-    fi
-
-    # If total missing, derive from assigned+unclassified
-    if ! [[ "$total" =~ ^[0-9]+$ ]] || [ "$total" -le 0 ]; then
-      total=$((assigned + unclassified))
-    fi
-
-    # Boundaries
-    [ "$assigned"    -ge 0 ] || assigned=0
-    [ "$unclassified" -ge 0 ] || unclassified=0
     unassigned=$(( total - assigned ))
-    [ "$unassigned" -ge 0 ] || unassigned=0
-
+    if [ "$unassigned" -lt 0 ]; then unassigned=0; fi
     assigned_frac=$(awk -v a="$assigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", a/t; else print "0"}')
     unassigned_frac=$(awk -v u="$unassigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", u/t; else print "0"}')
 
