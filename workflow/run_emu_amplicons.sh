@@ -366,7 +366,7 @@ plot_genus_stacks() {
   local outd="${OUTDIR}/plots"
   [ -s "$abund" ] || { warn "No abundance table at ${abund}; skipping plots."; return 0; }
   if command -v Rscript >/dev/null 2>&1; then
-    Rscript workflow/plot_emu_genus_stacks.R "$abund" "$outd"
+    Rscript workflow/plot_genus_stacks.R "$abund" "$outd"
     log "Genus stacks saved in ${outd}/emu_genus_stacks_*.png/pdf"
   else
     warn "Rscript not found in env; skipping plots."
