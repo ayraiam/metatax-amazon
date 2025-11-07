@@ -218,8 +218,8 @@ discover_fastqs() {
 
 #limit to first 3 FASTQs for testing
 limit_to_three_fastqs() {
-  if [ ${#FASTQS[@]} -gt 3 ]; then
-    log "Limiting run to first 3 FASTQs for this test."
+  if [[ "${LIMIT_FASTQS:-1}" -eq 1 && ${#FASTQS[@]} -gt 3 ]]; then
+    log "Limiting run to first 3 FASTQs for this test. (Set LIMIT_FASTQS=0 to disable)"
     FASTQS=( "${FASTQS[@]:0:3}" )
   fi
   printf ">>> Using FASTQs:\n" | tee -a "$RUN_LOG"
