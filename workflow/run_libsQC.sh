@@ -679,8 +679,18 @@ set_all_primers_for_checks
 # Single global primer trimming (no classification)
 time_function global_primer_trim
 
-# From here on, operate on globally trimmed reads
-FASTQ_FILES=( "${RESULTS}/trimmed/"*.fastq.gz )
+# ----------------------------------------------------------
+# From here on, operate on globally trimmed reads only
+# ----------------------------------------------------------
+echo ">>> Switching context to trimmed FASTQs for downstream QC and filtering..."
+shopt -s nullglob
+FASTQ_FILES=( "${RESULTS}/trimmed/"*.trimmed.fastq.gz )
+shopt -u nullglob
+if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
+  echo "!!! No trimmed FASTQs found — aborting."; exit 1;
+fi
+printf ">>> Found %d trimmed FASTQs:\n" "${#FASTQ_FILES[@]}"
+printf "    %s\n" "${FASTQ_FILES[@]}"
 
 # Initial QC on trimmed data
 time_function run_fastqc_all
