@@ -291,6 +291,25 @@ run_emu_per_fastq() {
     # write a small per-sample info file with total reads for convenience
     echo -e "file\ttotal_reads" > "${outdir}/input_reads.tsv"
     echo -e "${base}\t$(count_reads "$fq")" >> "${outdir}/input_reads.tsv"
+
+    # --- normalize abundance file to ${outdir}/abundance.tsv ---------------
+    # try to find abundance file if Emu named it differently / gzipped / CSV
+    if [ ! -s "${outdir}/abundance.tsv" ]; then
+      # look up to one level deeper (some tools create nested folders)
+      cand=$(find "$outdir" -maxdepth 2 -type f \
+               \( -iname "*abundance*.tsv" -o -iname "*abundance*.csv" -o -iname "*abundance*.tsv.gz" -o -iname "*abundance*.csv.gz" \) \
+               | head -n1)
+      if [ -n "$cand" ]; then
+        case "$cand" in
+          *.tsv.gz)    gzip -cd "$cand" > "${outdir}/abundance.tsv" ;;
+          *.csv.gz)    gzip -cd "$cand" | tr ',' '\t' > "${outdir}/abundance.tsv" ;;
+          *.csv)       tr ',' '\t' < "$cand" > "${outdir}/abundance.tsv" ;;
+          *.tsv|*.txt) cp -f "$cand" "${outdir}/abundance.tsv" ;;
+          *)           : ;;
+        esac
+      fi
+    fi
+    # ----------------------------------------------------------------------
   done
 }
 
@@ -333,7 +352,7 @@ collate_emu_outputs() {
         NF>0 {print b, (R? $R:""), (T? $T:""), (A? $A:""), (C? $C:"")}
       ' "${d}/abundance.tsv" >> "$abund_out"
     else
-      warn "Missing ${d}/abundance.tsv — no abundance rows for ${base}"
+      warn "Missing standardized abundance file at ${d}/abundance.tsv — Emu may have produced no matches or wrote an unexpected format."  
     fi
 
     # ------------------- MAPPING STATS ---------------------
