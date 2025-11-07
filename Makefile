@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: setup run run-local run-emu clean  # <<< ADDED run-emu target
+.PHONY: setup run run-local run-emu clean  
 
 # ------------------------------------------------------------
 # 1) Bootstrap project (creates dirs, checks envs)
@@ -22,9 +22,11 @@ run-local:
 
 # ------------------------------------------------------------
 # 4) Run Emu Amplicons stage (classification)
+#    Tip: override envs if needed, e.g.:
+#      make run-emu LIMIT_FASTQS=0 FASTQ_DIR_DEFAULT=results/filtered
 # ------------------------------------------------------------
-run-emu:                                      # <<< ADDED target for Emu pipeline
-	bash workflow/run_emu_amplicons.sh        # <<< ADDED command
+run-emu:                                      
+	bash workflow/runall.sh --no-qc           
 
 # ------------------------------------------------------------
 # 5) Clean results and logs (does NOT touch refdb/ or config/)
