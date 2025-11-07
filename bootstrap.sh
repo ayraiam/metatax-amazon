@@ -50,8 +50,9 @@ else
 fi
 
 # ----------------------------------------------------------
-# 4) Create the 'emu-env' environment if missing
+# 4) (Optional) Create the 'emu-env' environment if missing
 # ----------------------------------------------------------
+# <<< ADDED (supports Emu pipeline right away)
 if ! $MAMBA env list | grep -qE '^emu-env\s'; then
   if [ -f envs/emu-env.yml ]; then
     echo ">>> Creating environment 'emu-env' from envs/emu-env.yml..."
@@ -68,8 +69,9 @@ fi
 # ----------------------------------------------------------
 echo ">>> Bootstrap complete!"
 echo ">>> You can now run either:"
-echo "      bash workflow/runall.sh           # <<< CHANGED: QC (libsQC) + Emu via Slurm"
+echo "      bash workflow/runall.sh  "
 echo "   or"
-echo "      bash workflow/runall.sh --no-qc   # <<< CHANGED: Emu only (assumes results/filtered exists)"
+echo "      bash workflow/runall.sh --no-qc  "
+
 
 
