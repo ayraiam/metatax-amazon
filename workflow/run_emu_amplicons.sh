@@ -315,10 +315,11 @@ collate_emu_outputs() {
     local base
     base=$(basename "$d")
 
-    # abundance table (robust to minor header differences)
+    # ------------------- ABUNDANCE PARSE -------------------
     if [ -s "${d}/abundance.tsv" ]; then
-      awk -v b="$base" -F'\t' '
-        BEGIN{OFS="\t"}
+      # accept tab or comma; accept case-insensitive headers
+      awk -v b="$base" -F'[,\t]' '
+        BEGIN{OFS="\t"; IGNORECASE=1}
         NR==1{
           for(i=1;i<=NF;i++){
             if($i~/^rank$/) R=i;
@@ -328,28 +329,79 @@ collate_emu_outputs() {
           }
           next
         }
-        {print b, (R? $R:""), (T? $T:""), (A? $A:""), (C? $C:"")}
+        # guard against short lines
+        NF>0 {print b, (R? $R:""), (T? $T:""), (A? $A:""), (C? $C:"")}
       ' "${d}/abundance.tsv" >> "$abund_out"
+    else
+      warn "Missing ${d}/abundance.tsv — no abundance rows for ${base}"
     fi
 
-    # mapping stats:
-    # prefer read_assignments.tsv if present; fallback to counts.tsv with an "Unclassified" row
+    # ------------------- MAPPING STATS ---------------------
+    # Prefer our recorded input total; fallback later if missing
     total=$(awk 'NR==2{print $2; exit}' "${d}/../${base}/input_reads.tsv" 2>/dev/null || echo 0)
 
-    if [ -s "${d}/read_assignments.tsv" ]; then
-      assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read_assignments.tsv")
-    elif [ -s "${d}/counts.tsv" ]; then
-      # If counts.tsv has per-taxon read counts and an "Unclassified" row
-      unclassified=$(awk -F'\t' 'tolower($1)=="unclassified"{print $2+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
-      assigned=$(awk -F'\t' 'NR>1 && tolower($1)!="unclassified"{s+=$2} END{print s+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
-      [ "$total" -gt 0 ] || total=$((assigned + unclassified))
-    else
-      assigned=0
+    # robust assigned/unassigned from abundance.tsv (primary)
+    assigned=0
+    unclassified=0
+    if [ -s "${d}/abundance.tsv" ]; then
+      # Sum "count" where taxon != Unclassified (case-insensitive)
+      assigned=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
+        NR==1{
+          for(i=1;i<=NF;i++){ if($i~/^taxon$/) T=i; if($i~/^count$/) C=i }
+          next
+        }
+        (T && C) {
+          t=$T; gsub(/^ *| *$/,"",t)
+          if(t ~ /^unclassified$/) uc+=$C+0; else asg+=$C+0
+        }
+        END{ if(asg=="") asg=0; print asg }' "${d}/abundance.tsv")
+      unclassified=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
+        NR==1{
+          for(i=1;i<=NF;i++){ if($i~/^taxon$/) T=i; if($i~/^count$/) C=i }
+          next
+        }
+        (T && C) {
+          t=$T; gsub(/^ *| *$/,"",t)
+          if(t ~ /^unclassified$/) uc+=$C+0
+        }
+        END{ if(uc=="") uc=0; print uc }' "${d}/abundance.tsv")
     fi
 
+    # fallback to read_assignments (either name) if abundance counts absent
+    if [ "$assigned" -eq 0 ]; then
+      if   [ -s "${d}/read_assignments.tsv" ]; then
+        assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read_assignments.tsv")
+      elif [ -s "${d}/read-assignments.tsv" ]; then
+        assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read-assignments.tsv")
+      fi
+    fi
+
+    # final fallback to counts.tsv if still zero/unknown
+    if [ "$assigned" -eq 0 ] && [ -s "${d}/counts.tsv" ]; then
+      unclassified=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
+        NR==1{for(i=1;i<=NF;i++){if($i~/^taxon$/) T=i; if($i~/^count$/) C=i}; next}
+        (T && C) { if(tolower($T)=="unclassified") uc+=$C+0 }
+        END{ if(uc=="") uc=0; print uc }' "${d}/counts.tsv")
+      assigned=$(awk -F'[,\t]' 'BEGIN{IGNORECASE=1}
+        NR==1{for(i=1;i<=NF;i++){if($i~/^taxon$/) T=i; if($i~/^count$/) C=i}; next}
+        (T && C) { if(tolower($T)!="unclassified") asg+=$C+0 }
+        END{ if(asg=="") asg=0; print asg }' "${d}/counts.tsv")
+    fi
+
+    # If total missing, derive from assigned+unclassified
+    if ! [[ "$total" =~ ^[0-9]+$ ]] || [ "$total" -le 0 ]; then
+      total=$((assigned + unclassified))
+    fi
+
+    # Boundaries
+    [ "$assigned"    -ge 0 ] || assigned=0
+    [ "$unclassified" -ge 0 ] || unclassified=0
     unassigned=$(( total - assigned ))
+    [ "$unassigned" -ge 0 ] || unassigned=0
+
     assigned_frac=$(awk -v a="$assigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", a/t; else print "0"}')
     unassigned_frac=$(awk -v u="$unassigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", u/t; else print "0"}')
+
     echo -e "${base}\t${total}\t${assigned}\t${assigned_frac}\t${unassigned}\t${unassigned_frac}" >> "$map_out"
   done
   shopt -u nullglob
