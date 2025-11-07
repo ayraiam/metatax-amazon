@@ -93,7 +93,7 @@ bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
 bash workflow/runall.sh --no-emu --time 08:00:00 --cpus 16 --mem 32G
 
 # 4) Run only Emu (assuming QC already done)
-bash workflow/runall.sh --no-qc --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
+LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
 
 # 5) Run both, giving Emu more resources
 bash workflow/runall.sh \
