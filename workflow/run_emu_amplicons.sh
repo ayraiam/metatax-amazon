@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ==========================================================
 # Script: run_emu_amplicons.sh
-# Purpose: Install/check Emu + DBs, split FASTQ by length bins, run Emu per bin
+# Purpose: Install/check Emu + DBs, run Emu per FASTQ (no length bins),
+#          collect abundance + mapping stats, and plot genus-level stacks.
 # Notes:
 #   - Requires conda/mamba (Miniforge/Conda) + seqkit
-#   - Input FASTQ files live in data/
+#   - Input FASTQ files live in results/filtered/ (default) or FASTQ_DIR_DEFAULT
 #   - Outputs to results/, logs to logs/
 # ==========================================================
 
@@ -14,24 +15,13 @@ set -euo pipefail
 THREADS="${THREADS:-8}"
 
 # Databases:
-# 1) Emu official 16S (bacteria+archaea) — will be downloaded automatically if missing
-EMU_DB16S_DIR="${EMU_DB16S_DIR:-$PWD/refdb/emu_16S}"   # auto-fetched
+EMU_DB16S_DIR="${EMU_DB16S_DIR:-$PWD/refdb/emu_16S}"
 
-# 2) Custom Emu-format DB paths for ITS / LSU (must be provided by user if we want Emu on these)
-# Each directory must contain: species_taxid.fasta  and  taxonomy.tsv
-EMU_DB_ITS_DIR="${EMU_DB_ITS_DIR:-}"   # e.g., /path/to/emu_db_unite_its
-EMU_DB_LSU_DIR="${EMU_DB_LSU_DIR:-}"   # e.g., /path/to/emu_db_silva_lsu
+# Optional (not used in this run but kept for future flexibility)
+EMU_DB_ITS_DIR="${EMU_DB_ITS_DIR:-}"
+EMU_DB_LSU_DIR="${EMU_DB_LSU_DIR:-}"
 
-# Length bins (non-overlapping; edit if needed)
-ITS_MIN="${ITS_MIN:-200}"; ITS_MAX="${ITS_MAX:-650}"
-LSU_MIN="${LSU_MIN:-651}"; LSU_MAX="${LSU_MAX:-1199}"
-S16_MIN="${S16_MIN:-1200}"; S16_MAX="${S16_MAX:-1900}"
-AMB_MIN="${AMB_MIN:-1901}"; AMB_MAX="${AMB_MAX:-3300}"
-
-# Env name
 ENV_NAME="${ENV_NAME:-emu-env}"
-
-# Type of sequencing
 EMU_TYPE="${EMU_TYPE:-map-ont}"
 
 # ----------------------------------------------------------
@@ -45,11 +35,6 @@ mkdir -p "$OUTDIR" "$METADIR" refdb "$LOGDIR"
 RUN_LOG="${LOGDIR}/run_emu_amplicons.$(date +%Y%m%d_%H%M%S).log"
 touch "$RUN_LOG"
 
-#Root for bin outputs inside filtered/
-BINS_ROOT="${BINS_ROOT:-results/filtered/bin_splits}"
-mkdir -p "$BINS_ROOT"
-
-# Marker enable flags (computed after DB checks)
 ENABLE_16S=1
 ENABLE_ITS=0
 ENABLE_LSU=0
@@ -76,14 +61,12 @@ time_function() {
     return $status
 }
 
-# Log helper
 log()  { echo -e ">>> $*" | tee -a "$RUN_LOG" >&2; }
 warn() { echo -e "!!! $*" | tee -a "$RUN_LOG" >&2; }
 die()  { echo -e "xxx $*" | tee -a "$RUN_LOG" >&2; exit 1; }
 
 # ----------------------------------------------------------
 # Function: ensure_channels
-#   Reset channels order and strict priority; clear index cache
 # ----------------------------------------------------------
 ensure_channels() {
     echo ">>> Ensuring Conda channels (conda-forge, bioconda, defaults) with strict priority..." | tee -a "$RUN_LOG"
@@ -101,15 +84,12 @@ ensure_channels() {
 
 # ----------------------------------------------------------
 # Create/activate env
-#   - If exists: activate
-#   - Else: ensure_channels + create (retry once on solver failure)
 # ----------------------------------------------------------
 create_env_emu() {
   log "Checking conda/mamba..."
   if ! command -v conda >/dev/null 2>&1; then
     die "conda not found. Install Miniforge/Conda first."
   fi
-  # shellcheck disable=SC1091
   source "$(conda info --base)/etc/profile.d/conda.sh"
 
   if conda env list | grep -qE "^${ENV_NAME}\s"; then
@@ -117,9 +97,7 @@ create_env_emu() {
     conda activate "${ENV_NAME}"
     log "Environment '${ENV_NAME}' is now active."
   else
-    # Only enforce channels & clean index when creating
     ensure_channels
-
     log "Environment '${ENV_NAME}' not found. Creating it now (strict priority)..."
     set +e
     if command -v mamba >/dev/null 2>&1; then
@@ -154,30 +132,22 @@ create_env_emu() {
       echo ">>> Environment '${ENV_NAME}' created successfully (strict priority)." | tee -a "$RUN_LOG"
     fi
 
-    # Activate the newly created env
     conda activate "${ENV_NAME}"
     echo ">>> Environment '${ENV_NAME}' is now active." | tee -a "$RUN_LOG"
   fi
 
-  # show which Rscript is in-path for debugging
   log "Rscript path in env: $(which Rscript)"
-
-  # Verify required tools
   command -v emu >/dev/null 2>&1 || die "emu not available in env"
   command -v minimap2 >/dev/null 2>&1 || die "minimap2 not available in env"
   command -v seqkit >/dev/null 2>&1 || die "seqkit not available in env"
-
   log "Env ready: $(which python); emu=$(which emu)"
 }
 
 # ----------------------------------------------------------
-# Export the active emu env to envs/emu-env.yml
+# Export env
 # ----------------------------------------------------------
 export_emu_env() {
-  if [ ! -d envs ]; then
-      log "Directory 'envs/' not found. Creating it..."
-      mkdir -p envs
-  fi
+  mkdir -p envs
   log "Exporting environment to envs/${ENV_NAME}.yml ..."
   conda env export --name "${ENV_NAME}" > "envs/${ENV_NAME}.yml"
   log "Environment exported: envs/${ENV_NAME}.yml"
@@ -205,7 +175,7 @@ ensure_emu16s_db() {
 }
 
 # ----------------------------------------------------------
-# ITS/LSU DBs (custom): just check presence if user provided
+# Optional DB presence checks (not used here)
 # ----------------------------------------------------------
 check_optional_db() {
   local d="$1" ; local label="$2"
@@ -217,7 +187,6 @@ check_optional_db() {
   return 1
 }
 
-# Compute which markers are enabled based on DB availability
 set_marker_flags() {
   ENABLE_16S=1
   ENABLE_ITS=0
@@ -232,7 +201,7 @@ set_marker_flags() {
 }
 
 # ----------------------------------------------------------
-# FASTQ discovery
+# FASTQ discovery (expects trimmed/filtered fastqs in results/filtered)
 # ----------------------------------------------------------
 FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}"
 FASTQ_MANIFEST="${FASTQ_MANIFEST:-${METADIR}/fastq_meta.tsv}"
@@ -247,18 +216,23 @@ discover_fastqs() {
   log "Found ${#FASTQS[@]} FASTQ files."
 }
 
-# ----------------------------------------------------------
-# Build or reuse manifest with parsed metadata
-# ----------------------------------------------------------
+#limit to first 3 FASTQs for testing
+limit_to_three_fastqs() {
+  if [ ${#FASTQS[@]} -gt 3 ]; then
+    log "Limiting run to first 3 FASTQs for this test."
+    FASTQS=( "${FASTQS[@]:0:3}" )
+  fi
+  printf ">>> Using FASTQs:\n" | tee -a "$RUN_LOG"
+  printf "    %s\n" "${FASTQS[@]}" | tee -a "$RUN_LOG"
+}
+
 build_fastq_meta() {
   if [ -s "$FASTQ_MANIFEST" ]; then
     log "Manifest already exists; reusing: $FASTQ_MANIFEST"
     return 0
   fi
-
   log "Building manifest with sample, replicate, and molecular_feature columns"
   mkdir -p "$(dirname "$FASTQ_MANIFEST")"
-
   {
     echo -e "file\tsample\treplicate\tmolecular_feature"
     for f in "${FASTQS[@]}"; do
@@ -271,203 +245,11 @@ build_fastq_meta() {
       echo -e "${f}\t${sample}\t${replicate}\t${molecular_feature}"
     done
   } > "$FASTQ_MANIFEST"
-
   log "Wrote manifest to $FASTQ_MANIFEST with $((${#FASTQS[@]})) entries."
 }
 
 # ----------------------------------------------------------
-# Split by length bins using seqkit (gz-aware)
-# - Auto-merge group labels if nominal ranges overlap
-# ----------------------------------------------------------
-emit_group_label() {
-  local min=$1 max=$2 wanted="$3" # ITS / LSU / 16S
-  echo "${wanted}_${min}-${max}"
-}
-
-maybe_merge_labels() {
-  local labA="$1" minA="$2" maxA="$3"
-  local labB="$4" minB="$5" maxB="$6"
-  if (( minB < maxA )) && (( minA < maxB )); then
-    echo "${labA}_${labB}_merged_${minA}-${maxB}"
-  else
-    echo ""
-  fi
-}
-
-split_fastq_bins() {
-  local f="$1"; local base="$2"
-  local outprefix="${BINS_ROOT}/${base}"
-  mkdir -p "${outprefix}/bins"
-
-  # Build labels (no overlaps by our defaults)
-  LABEL_ITS=$(emit_group_label "$ITS_MIN" "$ITS_MAX" "ITS")
-  LABEL_LSU=$(emit_group_label "$LSU_MIN" "$LSU_MAX" "LSU")
-  LABEL_16S=$(emit_group_label "$S16_MIN" "$S16_MAX" "16S")
-  LABEL_AMB=$(emit_group_label "$AMB_MIN" "$AMB_MAX" "Ambiguous")
-
-  MERGE_ITS_LSU=$(maybe_merge_labels "ITS" "$ITS_MIN" "$ITS_MAX" "LSU" "$LSU_MIN" "$LSU_MAX")
-  if [ -n "$MERGE_ITS_LSU" ]; then LABEL_ITS="$MERGE_ITS_LSU"; LABEL_LSU="$MERGE_ITS_LSU"; fi
-
-  log "Splitting ${f} into bins:"
-  log "  - ${LABEL_ITS}"
-  log "  - ${LABEL_LSU}"
-  log "  - ${LABEL_16S}"
-  log "  - ${LABEL_AMB}"
-
-  # Outputs go to ${BINS_ROOT}/${base}/bins/
-  local out_its="${outprefix}/bins/${base}.${LABEL_ITS}.fastq.gz"
-  local out_lsu="${outprefix}/bins/${base}.${LABEL_LSU}.fastq.gz"
-  local out_16s="${outprefix}/bins/${base}.${LABEL_16S}.fastq.gz"
-  local out_amb="${outprefix}/bins/${base}.${LABEL_AMB}.fastq.gz"
-
-  seqkit seq -g -m "$ITS_MIN" -M "$ITS_MAX" -o "$out_its" "$f" 2>>"$RUN_LOG" || true
-  seqkit seq -g -m "$LSU_MIN" -M "$LSU_MAX" -o "$out_lsu" "$f" 2>>"$RUN_LOG" || true
-  seqkit seq -g -m "$S16_MIN" -M "$S16_MAX" -o "$out_16s" "$f" 2>>"$RUN_LOG" || true
-  seqkit seq -g -m "$AMB_MIN" -M "$AMB_MAX" -o "$out_amb" "$f" 2>>"$RUN_LOG" || true
-
-  # Return TSV saved alongside the bins under ${BINS_ROOT}/${base}/
-  awk -v l1="$LABEL_ITS" -v f1="$out_its" \
-      -v l2="$LABEL_LSU" -v f2="$out_lsu" \
-      -v l3="$LABEL_16S" -v f3="$out_16s" \
-      -v l4="$LABEL_AMB" -v f4="$out_amb" '
-      function nonempty(ff){ cmd="bash -lc \"[ -s " ff " ] && echo 1 || echo 0\""; cmd | getline r; close(cmd); return r==1 }
-      BEGIN{
-        if (nonempty(f1)) print l1 "\t" f1;
-        if (nonempty(f2)) print l2 "\t" f2;
-        if (nonempty(f3)) print l3 "\t" f3;
-        if (nonempty(f4)) print l4 "\t" f4;
-      }'
-}
-
-# ----------------------------------------------------------
-# Run Emu for a given bin (chooses DB based on label)
-# ----------------------------------------------------------
-run_emu_for_bin() {
-  local label="$1"; local binfastq="$2"; local base="$3"
-  local outdir="${OUTDIR}/emu_runs/${base}/emu_${label}"
-  mkdir -p "$(dirname "$outdir")"
-
-  case "$label" in
-    16S* )
-      mkdir -p "$outdir"
-      if ! emu abundance \
-            --threads "$THREADS" \
-            --db "$EMU_DB16S_DIR" \
-            --output-dir "$outdir" \
-            --keep-counts \
-            --keep-read-assignments \
-            --output-unclassified \
-            --type "$EMU_TYPE" \
-            "$binfastq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG"; then
-        warn "Emu 16S failed for ${base} (${label}); removing empty outdir."
-        rmdir "$outdir" >/dev/null 2>&1 || true
-      fi
-      ;;
-    ITS* )
-      if [ "$ENABLE_ITS" -eq 1 ]; then
-        mkdir -p "$outdir"
-        if ! emu abundance \
-              --threads "$THREADS" \
-              --db "$EMU_DB_ITS_DIR" \
-              --output-dir "$outdir" \
-              --keep-counts \
-              --keep-read-assignments \
-              --output-unclassified \
-              --type "$EMU_TYPE" \
-              "$binfastq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG"; then
-          warn "Emu ITS failed for ${base} (${label}); removing empty outdir."
-          rmdir "$outdir" >/dev/null 2>&1 || true
-        fi
-      else
-        warn "Skipping ITS bin for ${base} (ITS DB not available)."
-      fi
-      ;;
-    LSU* )
-      if [ "$ENABLE_LSU" -eq 1 ]; then
-        mkdir -p "$outdir"
-        if ! emu abundance \
-              --threads "$THREADS" \
-              --db "$EMU_DB_LSU_DIR" \
-              --output-dir "$outdir" \
-              --keep-counts \
-              --keep-read-assignments \
-              --output-unclassified \
-              --type "$EMU_TYPE" \
-              "$binfastq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG"; then
-          warn "Emu LSU failed for ${base} (${label}); removing empty outdir."
-          rmdir "$outdir" >/dev/null 2>&1 || true
-        fi
-      else
-        warn "Skipping LSU bin for ${base} (LSU DB not available)."
-      fi
-      ;;
-    Ambiguous* )
-      warn "Skipping Ambiguous_long bin (${binfastq}) from classification (set RUN_AMBIGUOUS=1 to force)."
-      # no mkdir here, so no empty emu_Ambiguous_* dirs appear
-      ;;
-    * )
-      warn "Unknown label '${label}' for ${binfastq} — skipping."
-      ;;
-  esac
-}
-
-# ----------------------------------------------------------
-# Split all FASTQs into bins (per-sample)
-# ----------------------------------------------------------
-split_bins_all() {
-  for f in "${FASTQS[@]}"; do
-    local base
-    base=$(basename "$f")
-    base=${base%.fastq.gz}; base=${base%.fq.gz}; base=${base%.fastq}; base=${base%.fq}
-    mkdir -p "${BINS_ROOT}/${base}"
-    local BIN_TSV="${BINS_ROOT}/${base}/bins_index.tsv"
-    split_fastq_bins "$f" "$base" > "$BIN_TSV"
-  done
-}
-
-# ----------------------------------------------------------
-# Run Emu across all non-empty bins (per-sample)
-# ----------------------------------------------------------
-run_emu_all() {
-  shopt -s nullglob
-  local BIN_INDEXES=( "${BINS_ROOT}"/*/bins_index.tsv )
-  shopt -u nullglob
-
-  if [ ${#BIN_INDEXES[@]} -eq 0 ]; then
-    warn "[run_emu_all] No bins_index.tsv found under ${BINS_ROOT}/*/ — nothing to run."
-    return 0
-  fi
-
-  for BIN_TSV in "${BIN_INDEXES[@]}"; do
-    local base
-    base="$(basename "$(dirname "$BIN_TSV")")"
-    [ -s "$BIN_TSV" ] || { warn "[run_emu_all] Empty ${BIN_TSV}; skipping ${base}."; continue; }
-
-    while IFS=$'\t' read -r label binfq; do
-      [ -n "$label" ] || continue
-      # trim & require known labels
-      label="$(echo "$label" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
-      [[ "$label" =~ ^(16S|ITS|LSU) ]] || continue
-      # skip Ambiguous here, too (defensive)
-      [[ "$label" =~ ^Ambiguous ]] && continue
-      # require a non-empty bin fastq
-      [ -s "$binfq" ] || { warn "[run_emu_all] Missing/empty bin FASTQ for ${base} (${label}): $binfq"; continue; }
-
-      # Respect enabled markers
-      if [[ "$label" =~ ^ITS ]] && [ "$ENABLE_ITS" -ne 1 ]; then
-        log "Skipping ITS bin '${label}' for ${base} (ITS DB missing)."; continue
-      fi
-      if [[ "$label" =~ ^LSU ]] && [ "$ENABLE_LSU" -ne 1 ]; then
-        log "Skipping LSU bin '${label}' for ${base} (LSU DB missing)."; continue
-      fi
-
-      run_emu_for_bin "$label" "$binfq" "$base"
-    done < "$BIN_TSV"
-  done
-}
-
-# ----------------------------------------------------------
-# Count reads quickly (gz or plain). Uses seqkit if available, else wc/4.
+# QUICK read counter
 # ----------------------------------------------------------
 count_reads() {
   local f="$1"
@@ -486,64 +268,120 @@ count_reads() {
 }
 
 # ----------------------------------------------------------
-# Build bin counts manifest (metadata/bin_counts.tsv)
+# Run Emu per FASTQ (no binning), keep outputs
 # ----------------------------------------------------------
-make_bin_counts_manifest() {
-  log "Building bin counts manifest ..."
-  mkdir -p "$METADIR"
-
-  local out="${METADIR}/bin_counts.tsv"
-  echo -e "library\tfiltered_fastq\ttotal_reads\tbin_label\tbin_fastq\tbin_reads\tunbinned_reads\tcheck_sum_ok" > "$out"
-
-  for f in "${FASTQS[@]}"; do
+run_emu_per_fastq() {
+  for fq in "${FASTQS[@]}"; do
     local base
-    base=$(basename "$f")
-    base=${base%.fastq.gz}; base=${base%.fq.gz}; base=${base%.fastq}; base=${base%.fq}
+    base=$(basename "$fq"); base=${base%.fastq.gz}; base=${base%.fq.gz}; base=${base%.fastq}; base=${base%.fq}
+    local outdir="${OUTDIR}/emu_runs/${base}"
+    mkdir -p "$outdir"
 
-    local filtered="$f"
-    local total
-    total=$(count_reads "$filtered")
+    log "Running Emu (16S) on ${base} ..."
+    emu abundance \
+      --threads "$THREADS" \
+      --db "$EMU_DB16S_DIR" \
+      --output-dir "$outdir" \
+      --keep-counts \
+      --keep-read-assignments \
+      --output-unclassified \
+      --type "$EMU_TYPE" \
+      "$fq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG" || warn "Emu failed for ${base}"
 
-    # bins live under ${BINS_ROOT}/${base}/bins/
-    local bin_dir="${BINS_ROOT}/${base}/bins"
-    local sum_bins=0
-
-    shopt -s nullglob
-    local bin_files=( "$bin_dir"/*.fastq.gz "$bin_dir"/*.fq.gz "$bin_dir"/*.fastq "$bin_dir"/*.fq )
-    shopt -u nullglob
-
-    if [ ${#bin_files[@]} -gt 0 ]; then
-      for bf in "${bin_files[@]}"; do
-        local b_reads
-        b_reads=$(count_reads "$bf")
-        sum_bins=$(( sum_bins + b_reads ))
-        local blabel
-        blabel=$(basename "$bf")
-        blabel=${blabel%.fastq.gz}; blabel=${blabel%.fq.gz}; blabel=${blabel%.fastq}; blabel=${blabel%.fq}
-        blabel=${blabel#${base}.}
-        echo -e "${base}\t${filtered}\t${total}\t${blabel}\t${bf}\t${b_reads}\tNA\tNA" >> "$out"
-      done
-    fi
-
-    local unbinned=$(( total - sum_bins ))
-    local ok="FALSE"
-    if [ "$sum_bins" -eq "$total" ]; then ok="TRUE"; fi
-    echo -e "${base}\t${filtered}\t${total}\tUNBINNED\tNA\t0\t${unbinned}\t${ok}" >> "$out"
+    # write a small per-sample info file with total reads for convenience
+    echo -e "file\ttotal_reads" > "${outdir}/input_reads.tsv"
+    echo -e "${base}\t$(count_reads "$fq")" >> "${outdir}/input_reads.tsv"
   done
-
-  log "Wrote bin counts manifest: ${out}"
 }
 
 # ----------------------------------------------------------
-# Replicates strategy note (I / II / III)
+# Collate abundance and mapping/alignment stats
+# ----------------------------------------------------------
+collate_emu_outputs() {
+  mkdir -p "${OUTDIR}/tables"
+
+  local abund_out="${OUTDIR}/tables/abundance_combined.tsv"
+  local map_out="${OUTDIR}/tables/mapping_stats.tsv"
+  : > "$abund_out"
+  : > "$map_out"
+
+  # headers
+  echo -e "file\trank\ttaxon\tabundance\tcount" >> "$abund_out"
+  echo -e "file\ttotal_reads\tassigned_reads\tassigned_frac\tunassigned_reads\tunassigned_frac" >> "$map_out"
+
+  shopt -s nullglob
+  for d in "${OUTDIR}/emu_runs/"*; do
+    [ -d "$d" ] || continue
+    local base
+    base=$(basename "$d")
+
+    # abundance table (robust to minor header differences)
+    if [ -s "${d}/abundance.tsv" ]; then
+      awk -v b="$base" -F'\t' '
+        BEGIN{OFS="\t"}
+        NR==1{
+          for(i=1;i<=NF;i++){
+            if($i~/^rank$/) R=i;
+            else if($i~/^taxon$/) T=i;
+            else if($i~/^abundance/) A=i;
+            else if($i~/^count$/) C=i;
+          }
+          next
+        }
+        {print b, (R? $R:""), (T? $T:""), (A? $A:""), (C? $C:"")}
+      ' "${d}/abundance.tsv" >> "$abund_out"
+    fi
+
+    # mapping stats:
+    # prefer read_assignments.tsv if present; fallback to counts.tsv with an "Unclassified" row
+    total=$(awk 'NR==2{print $2; exit}' "${d}/../${base}/input_reads.tsv" 2>/dev/null || echo 0)
+
+    if [ -s "${d}/read_assignments.tsv" ]; then
+      assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read_assignments.tsv")
+    elif [ -s "${d}/counts.tsv" ]; then
+      # If counts.tsv has per-taxon read counts and an "Unclassified" row
+      unclassified=$(awk -F'\t' 'tolower($1)=="unclassified"{print $2+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
+      assigned=$(awk -F'\t' 'NR>1 && tolower($1)!="unclassified"{s+=$2} END{print s+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
+      [ "$total" -gt 0 ] || total=$((assigned + unclassified))
+    else
+      assigned=0
+    fi
+
+    unassigned=$(( total - assigned ))
+    assigned_frac=$(awk -v a="$assigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", a/t; else print "0"}')
+    unassigned_frac=$(awk -v u="$unassigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", u/t; else print "0"}')
+    echo -e "${base}\t${total}\t${assigned}\t${assigned_frac}\t${unassigned}\t${unassigned_frac}" >> "$map_out"
+  done
+  shopt -u nullglob
+
+  log "Wrote abundance table -> ${abund_out}"
+  log "Wrote mapping stats   -> ${map_out}"
+}
+
+# ----------------------------------------------------------
+# Call the R plotting script
+# ----------------------------------------------------------
+plot_genus_stacks() {
+  local abund="${OUTDIR}/tables/abundance_combined.tsv"
+  local outd="${OUTDIR}/plots"
+  [ -s "$abund" ] || { warn "No abundance table at ${abund}; skipping plots."; return 0; }
+  if command -v Rscript >/dev/null 2>&1; then
+    Rscript workflow/plot_emu_genus_stacks.R "$abund" "$outd"
+    log "Genus stacks saved in ${outd}/emu_genus_stacks_*.png/pdf"
+  else
+    warn "Rscript not found in env; skipping plots."
+  fi
+}
+
+# ----------------------------------------------------------
+# Replicates strategy note
 # ----------------------------------------------------------
 write_replicate_guidance() {
   cat > "${LOGDIR}/REPLICATE_STRATEGY.txt" <<EOF
 Replicates strategy:
-- Each FASTQ (I/II/III) was classified independently.
-- For ecological inference, keep replicates separate when computing beta/alpha diversity.
-- For per-site summaries, aggregate replicate abundances (median of compositional vectors
-  or sum of estimated counts followed by renormalization).
+- Each FASTQ (I/II/III) was classified independently against the 16S database.
+- For per-site summaries, aggregate replicate abundances (centered log-ratio or
+  median across compositional vectors) after converting to relative abundance.
 EOF
   log "Wrote replicate guidance to ${LOGDIR}/REPLICATE_STRATEGY.txt"
 }
@@ -560,8 +398,6 @@ log_run_report() {
     echo " DB16S: ${EMU_DB16S_DIR}"
     echo " DB_ITS: ${EMU_DB_ITS_DIR:-<none>}"
     echo " DB_LSU: ${EMU_DB_LSU_DIR:-<none>}"
-    echo " Length bins:"
-    echo "  ITS: ${ITS_MIN}-${ITS_MAX} | LSU: ${LSU_MIN}-${LSU_MAX} | 16S: ${S16_MIN}-${S16_MAX} | Ambiguous: ${AMB_MIN}-${AMB_MAX}"
     echo " FASTQ manifest: ${METADIR}/fastq_meta.tsv"
     echo " Log file: ${RUN_LOG}"
     echo "=========================================================="
@@ -572,8 +408,6 @@ log_run_report() {
 # Calling the functions
 # ==========================================================
 START_TIME=$(date +%s)
-
-# Reset per-run timing file so reports don't accumulate across runs
 [ -d "$LOGDIR" ] || mkdir -p "$LOGDIR"
 : > "${LOGDIR}/.timing.tsv"
 
@@ -585,31 +419,22 @@ time_function export_emu_env
 # Optional DB presence checks (ITS/LSU) ----------------------------------
 time_function 'check_optional_db "'"$EMU_DB_ITS_DIR"'" "ITS"' || true
 time_function 'check_optional_db "'"$EMU_DB_LSU_DIR"'" "LSU"' || true
-
-#Decide which markers are enabled (16S always; ITS/LSU if DBs valid)
 time_function set_marker_flags
 
 # Input discovery ---------------------------------------------------------
 time_function discover_fastqs
+# limit to 3 for this test
+time_function limit_to_three_fastqs
 time_function build_fastq_meta
 
-# Binning by read length --------------------------------------------------
-time_function split_bins_all
+# Emu runs (per FASTQ) ----------------------------------------------------
+time_function run_emu_per_fastq
 
-# Per-library/bin read counts manifest -----------------------------------
-time_function make_bin_counts_manifest
+# Collate + plot ----------------------------------------------------------
+time_function collate_emu_outputs
+time_function plot_genus_stacks
 
-# Bin-length boxplots (R) -------------------------------------------------
-if command -v Rscript >/dev/null 2>&1 && [ -s "workflow/bin_length_boxplots.R" ]; then
-  time_function "Rscript workflow/bin_length_boxplots.R --bins-root=${BINS_ROOT}"
-else
-  warn "[skip] Rscript or workflow/bin_length_boxplots.R not found; skipping bin length boxplots."
-fi
-
-#Emu runs per bin ------------------------------------------------------
-time_function run_emu_all
-
-# Replicate guidance & final report --------------------------------------
+# Guidance & final report -------------------------------------------------
 time_function write_replicate_guidance
 time_function log_run_report
 
