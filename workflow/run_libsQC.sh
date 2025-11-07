@@ -21,13 +21,13 @@ fi
 # ---------------------------------------------------------------------------
 
 #User-tunable vars for threads and optional primer/summary inputs
-THREADS="${THREADS:-4}"
+THREADS="${THREADS:-8}"
 PRIMER_FWD="${PRIMER_FWD:-}"
 PRIMER_REV="${PRIMER_REV:-}"
 SEQ_SUMMARY="${SEQ_SUMMARY:-}"
 
-CUTADAPT_THREADS_PER_JOB="${CUTADAPT_THREADS_PER_JOB:-4}"
-GROUPS_IN_PARALLEL="${GROUPS_IN_PARALLEL:-2}"
+CUTADAPT_THREADS_PER_JOB="${CUTADAPT_THREADS_PER_JOB:-2}"
+GROUPS_IN_PARALLEL="${GROUPS_IN_PARALLEL:-4}"
 
 # primer trimming tolerance, list support, and report dirs
 PRIMER_ERR="${PRIMER_ERR:-0.20}"        # max mismatch rate for cutadapt matches
@@ -456,153 +456,38 @@ build_fastq_meta() {
     echo ">>> Manifest written: $out"
 }
 
-# ----------------------------------------------------------
-# Function: demux_by_primers — INDEPENDENT, 2-phase (fast)
-#   Phase 1: classification only (no big FASTQ outputs)
-#   Phase 2: trim only the assigned subsets (small)
-#   Tie-breaks are handled by _resolve_assignments (errors -> matched_len -> Unknown)
-# ----------------------------------------------------------
 demux_by_primers() {
-  echo ">>> Demultiplexing (independent, two-phase)..."
+  echo ">>> FAST Demultiplexing (single-pass cutadapt)..."
   local groups_root="${RESULTS}/groups"
-  mkdir -p "${groups_root}"
 
-  # helper: run a single classification job (Phase 1, no big FASTQ)
-  _classify_one_group() {
-    local inF="$1" grp="$2" FWD="$3" REV="$4" ovl="$5" outdir="$6"
-    mkdir -p "${outdir}"
-    local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
-    local REV_RC; REV_RC="$(revcomp_seq "$REV")"
-    local info="${outdir}/${b}.${grp}.info.txt"
-    local rpt="${outdir}/${b}.${grp}.report.txt"
-
-    # classification-only: no trimmed FASTQ written here
-    cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
-      --match-read-wildcards --revcomp \
-      -e "${PRIMER_ERR}" --overlap "${ovl}" \
-      -g "${FWD}" -a "${REV_RC}" \
-      --discard-untrimmed \
-      --report=minimal \
-      --info-file "${info}" \
-      -o /dev/null \
-      "$inF" > "${rpt}"
-  }
-
-  # simple bg job limiter
-  _wait_pool() {
-    local -n _pids=$1
-    local max="$2"
-    while ((${#_pids[@]} >= max)); do
-      wait "${_pids[0]}" 2>/dev/null || true
-      _pids=("${_pids[@]:1}")
-    done
-  }
-
-  # === Phase 1: run classification (four groups) per FASTQ ===
-  for inF in "${FASTQ_FILES[@]}"; do
-    local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
-
-    # spawn group jobs with a small pool
-    declare -a pids=()
-    # Archaea
-    _classify_one_group "$inF" "Archaea" "${PRIM_FWD_ARCHAEA}" "${PRIM_REV_ARCHAEA}" 16 "${groups_root}/Archaea/matches" & pids+=("$!")
-    _wait_pool pids "${GROUPS_IN_PARALLEL}"
-    # Ascomic
-    _classify_one_group "$inF" "Ascomic" "${PRIM_FWD_ASCOMIC}" "${PRIM_REV_ASCOMIC}" 16 "${groups_root}/Ascomic/matches" & pids+=("$!")
-    _wait_pool pids "${GROUPS_IN_PARALLEL}"
-    # Bac
-    _classify_one_group "$inF" "Bac"     "${PRIM_FWD_BAC}"     "${PRIM_REV_BAC}"     16 "${groups_root}/Bac/matches" & pids+=("$!")
-    _wait_pool pids "${GROUPS_IN_PARALLEL}"
-    # Basid
-    _classify_one_group "$inF" "Basid"   "${PRIM_FWD_BASID}"   "${PRIM_REV_BASID}"   12 "${groups_root}/Basid/matches" & pids+=("$!")
-    _wait_pool pids "${GROUPS_IN_PARALLEL}"
-
-    # wait for remaining group jobs
-    for pid in "${pids[@]}"; do wait "$pid" || true; done
-
-    # === Resolve conflicts using stats ===
-    # We copy info files (and any *.ids.txt if you already write them) into a per-FASTQ assign dir
-    local assign_dir="${groups_root}/_assign/${b}"; mkdir -p "${assign_dir}"
-    for G in Archaea Ascomic Bac Basid; do
-      cp -f "${groups_root}/${G}/matches/${b}.${G}.info.txt" "${assign_dir}/" 2>/dev/null || :
-      cp -f "${groups_root}/${G}/matches/${b}.${G}.ids.txt"  "${assign_dir}/" 2>/dev/null || :
-    done
-
-    # It should read the *.info.txt files in ${assign_dir} and produce:
-    #   - ${assign_dir}/final.Archaea.ids.txt  (and for Ascomic/Bac/Basid)
-    #   - ${assign_dir}/assigned.ids.txt       (union of finals)
-    _resolve_assignments "${assign_dir}"
-
-    # If resolver didn’t create the union list, build it here:
-    if [[ ! -s "${assign_dir}/assigned.ids.txt" ]]; then
-      cat "${assign_dir}"/final.*.ids.txt 2>/dev/null | awk 'NF{print $1}' | sort -u > "${assign_dir}/assigned.ids.txt"
-    fi
-
-    # === Phase 2: materialize small subsets, then trim once per group ===
-    # Create final trimmed reads per group in .../<G>/data/ for Emu
-    for G in Archaea Ascomic Bac Basid; do
-      local ids="${assign_dir}/final.${G}.ids.txt"
-      local sub="${assign_dir}/${b}.${G}.subset.fastq.gz"
-      local outdir="${groups_root}/${G}/data"; mkdir -p "${outdir}"
-      local outF="${outdir}/${b}.${G}.fastq.gz"
-
-      # If no reads assigned to G, ensure no stale file remains
-      if [[ ! -s "${ids}" ]]; then
-        rm -f "${outF}" 2>/dev/null || true
-        continue
-      fi
-
-      # 1) subset original by final IDs (small, fast)
-      if [[ "$inF" == *.gz ]]; then
-        zcat "$inF" | seqkit grep -n -f "${ids}" -w 0 | gzip > "${sub}"
-      else
-        seqkit grep -n -f "${ids}" "$inF" | gzip > "${sub}"
-      fi
-
-      # 2) run one cutadapt trim on the subset to produce the final trimmed FASTQ
-      local FWD REV OVL
-      case "$G" in
-        Archaea) FWD="${PRIM_FWD_ARCHAEA}"; REV="${PRIM_REV_ARCHAEA}"; OVL=16 ;;
-        Ascomic) FWD="${PRIM_FWD_ASCOMIC}"; REV="${PRIM_REV_ASCOMIC}"; OVL=16 ;;
-        Bac)     FWD="${PRIM_FWD_BAC}";     REV="${PRIM_REV_BAC}";     OVL=16 ;;
-        Basid)   FWD="${PRIM_FWD_BASID}";   REV="${PRIM_REV_BASID}";   OVL=12 ;;
-      esac
-      local REV_RC; REV_RC="$(revcomp_seq "$REV")"
-
-      cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
-        --match-read-wildcards --revcomp \
-        -e "${PRIMER_ERR}" --overlap "${OVL}" \
-        -g "${FWD}" -a "${REV_RC}" \
-        --discard-untrimmed \
-        --report=minimal \
-        -o "${outF}" \
-        "${sub}" > "${outF%.fastq.gz}.cutadapt_report.txt"
-
-      # drop the subset to save space
-      rm -f "${sub}"
-    done
-
-    # Unknown = everything not assigned
-    local outdirU="${groups_root}/Unknown/data"; mkdir -p "${outdirU}"
-    local outU="${outdirU}/${b}.Unknown.fastq.gz"
-    if [[ -s "${assign_dir}/assigned.ids.txt" ]]; then
-      if [[ "$inF" == *.gz ]]; then
-        zcat "$inF" | seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" -w 0 | gzip > "${outU}"
-      else
-        seqkit grep -n -v -f "${assign_dir}/assigned.ids.txt" "$inF" | gzip > "${outU}"
-      fi
-    else
-      # no assigned reads -> all unknown
-      if [[ "$inF" == *.gz ]]; then cp "$inF" "${outU}"; else gzip -c "$inF" > "${outU}"; fi
-    fi
-
-    # optional: clean up giant info files once assignments are done
-    if [[ "${KEEP_INFO:-0}" -eq 0 ]]; then
-      rm -f "${assign_dir}"/*.info.txt 2>/dev/null || true
-    fi
+  # Create output directories
+  for group in Archaea Ascomic Bac Basid Unknown; do
+    mkdir -p "${groups_root}/${group}/data"
   done
 
-  echo ">>> Independent two-phase demux complete. See ${groups_root}/*/data/"
+  for inF in "${FASTQ_FILES[@]}"; do
+    local bn="${inF##*/}"
+    local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
+
+    echo ">>> Processing $bn with single-pass demux..."
+
+    cutadapt -j "${THREADS}" \
+      --match-read-wildcards --revcomp \
+      -e "${PRIMER_ERR}" \
+      -g "Archaea=${PRIM_FWD_ARCHAEA};revcomp=${PRIM_REV_ARCHAEA}" \
+      -g "Ascomic=${PRIM_FWD_ASCOMIC};revcomp=${PRIM_REV_ASCOMIC}" \
+      -g "Bac=${PRIM_FWD_BAC};revcomp=${PRIM_REV_BAC}" \
+      -g "Basid=${PRIM_FWD_BASID};revcomp=${PRIM_REV_BASID}" \
+      --overlap 16 \
+      --no-trim \
+      --untrimmed-output "${groups_root}/Unknown/data/${b}.Unknown.fastq.gz" \
+      -o "${groups_root}/{name}/data/${b}.{name}.fastq.gz" \
+      "$inF"
+
+    echo ">>> Completed demux for $bn"
+  done
+
+  echo ">>> Single-pass demux complete. See ${groups_root}/*/data/"
 }
 
 run_fastqc_all() {
