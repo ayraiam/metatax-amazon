@@ -1,7 +1,7 @@
 suppressPackageStartupMessages({
   library(data.table)
   library(ggplot2)
-  library(RColorBrewer)   
+  library(RColorBrewer)
 })
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -53,8 +53,9 @@ if (has_genus) {
   dt[, genus := mapply(get_genus, taxon, rank)]
 }
 
-# Remove empties and non-finite abundances
-dt <- dt[!is.na(genus) & nzchar(genus) & is.finite(abundance)]
+# Map missing/blank genus to "No genus"; keep only finite abundances
+dt[is.na(genus) | !nzchar(genus), genus := "No genus"]
+dt <- dt[is.finite(abundance)]
 
 # ---- Collapse to one row per file × genus -------------------------------
 dt <- dt[, .(abundance = sum(as.numeric(abundance), na.rm = TRUE)), by = .(file, genus)]
@@ -85,30 +86,30 @@ dt[, rep := fifelse(grepl("(_I_|_II_|_III_)", file_base),
                     sub(".*_(I{1,3})_.*", "\\1", file_base),
                     NA_character_)]
 
-# Build replicate labels within each site:
-# - If only one of a given replicate in a site: label = I / II / III
-# - If multiple: label = Ia, Ib, Ic...
+# Build replicate labels within each site (Ia, Ib for duplicates)
 lab_map_dt <- unique(dt[, .(file_base, site, rep)])
 lab_map_dt[, dupN := .N, by = .(site, rep)]
 lab_map_dt[dupN == 1, rep_label := rep]
 lab_map_dt[dupN >  1, rep_label := paste0(rep, letters[seq_len(.N)]), by = .(site, rep)]
 
-# Order within site by replicate (I < II < III) then letter (a < b < c)
+# Order within site by replicate then letter
 lab_map_dt[, rep_rank := match(rep, c("I","II","III"))]
 setorder(lab_map_dt, site, rep_rank, rep_label)
 
-# Map: file_base -> label to print on x-axis
+# Map: file_base -> x-axis label
 lab_map <- setNames(lab_map_dt$rep_label, lab_map_dt$file_base)
 
-# x factor levels in a global order (facets show per-site subset)
+# x factor levels (global order)
 order_levels <- lab_map_dt[, file_base]
 dt[, file_factor := factor(file_base, levels = order_levels)]
 
-# ---- Top-N + 'Other' ----------------------------------------------------
+# ---- Strict Top-N + 'Other' (no tie spillover) --------------------------
 N <- 20
-dt[, rank_in_file := frank(-rel, ties.method = "min"), by = file_base]
-top_dt    <- dt[rank_in_file <= N, .(file_base, site, file_factor, genus, rel)]
-other_dt  <- dt[rank_in_file >  N, .(rel = sum(rel)), by = .(file_base, site, file_factor)]
+dt <- dt[order(file_base, -rel)]
+dt[, idx := seq_len(.N), by = file_base]
+
+top_dt   <- dt[idx <= N, .(file_base, site, file_factor, genus, rel)]
+other_dt <- dt[idx >  N, .(rel = sum(rel)), by = .(file_base, site, file_factor)]
 if (nrow(other_dt)) other_dt[, genus := "Other"]
 
 plot_dt <- rbindlist(list(top_dt, other_dt), use.names = TRUE, fill = TRUE)
@@ -118,7 +119,6 @@ genus_levels <- unique(plot_dt[genus != "Other"][order(-rel), genus])
 plot_dt[, genus := factor(genus, levels = c(genus_levels, "Other"))]
 
 # ---- Color palette selection --------------------------------------------
-# Build a discrete palette using diverging Brewer palettes, concatenated.
 make_diverging_palette <- function(n_colors, has_other = FALSE) {
   palette_names <- c("Spectral","RdYlGn","RdYlBu","RdGy","RdBu","PuOr","PRGn","PiYG","BrBG")
   info <- RColorBrewer::brewer.pal.info
@@ -127,7 +127,6 @@ make_diverging_palette <- function(n_colors, has_other = FALSE) {
   for (p in palette_names) {
     if (!(p %in% rownames(info))) next
     maxn <- info[p, "maxcolors"]
-    # Brewer diverging palettes require at least 3; take as many as possible (up to maxn)
     take <- min(maxn, max(0, needed))
     if (take > 0) {
       cols <- c(cols, RColorBrewer::brewer.pal(take, p)[seq_len(take)])
@@ -135,10 +134,7 @@ make_diverging_palette <- function(n_colors, has_other = FALSE) {
       if (needed <= 0) break
     }
   }
-  # If still short, recycle from the beginning (rare)
-  if (length(cols) < n_colors) {
-    cols <- rep(cols, length.out = n_colors)
-  }
+  if (length(cols) < n_colors) cols <- rep(cols, length.out = n_colors)
   cols[seq_len(n_colors)]
 }
 
@@ -147,7 +143,7 @@ has_other <- length(lev) > 0 && tail(lev, 1) == "Other"
 k <- length(lev) - ifelse(has_other, 1L, 0L)
 base_cols <- if (k > 0) make_diverging_palette(k) else character(0)
 fill_vals <- if (has_other) c(base_cols, "grey80") else base_cols
-names(fill_vals) <- lev  # align to factor levels
+names(fill_vals) <- lev
 
 # ---- Plotting ------------------------------------------------------------
 sites  <- unique(plot_dt$site)
@@ -157,12 +153,12 @@ plot_chunk <- function(sites_vec, idx){
   d <- plot_dt[site %in% sites_vec]
   if (!nrow(d)) return(invisible())
   p <- ggplot(d, aes(x = file_factor, y = rel, fill = genus)) +
-    geom_col(width = 0.9) +
+    geom_col(width = 0.7) +  
     facet_wrap(~ site, scales = "free_x") +
     labs(x = NULL, y = "Relative abundance (genus, %)", fill = "Genus") +
     scale_y_continuous(labels = function(z) 100*z,
                        expand = expansion(mult = c(0, 0.02))) +
-    scale_x_discrete(labels = lab_map) +                 
+    scale_x_discrete(labels = lab_map) +
     scale_fill_manual(values = fill_vals, drop = FALSE) +
     theme_bw(base_size = 10) +
     theme(
