@@ -17,7 +17,6 @@ THREADS="${THREADS:-8}"
 # Databases:
 EMU_DB16S_DIR="${EMU_DB16S_DIR:-$PWD/refdb/emu_16S}"
 
-# Optional (not used in this run but kept for future flexibility)
 EMU_DB_ITS_DIR="${EMU_DB_ITS_DIR:-}"
 EMU_DB_LSU_DIR="${EMU_DB_LSU_DIR:-}"
 
@@ -104,12 +103,14 @@ create_env_emu() {
       mamba create -n "${ENV_NAME}" \
         -c conda-forge -c bioconda \
         python=3.11 emu minimap2 "seqkit>=2.6" \
-        "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" -y
+        "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
+        pandas>=1.5 -y
     else
       conda create -n "${ENV_NAME}" \
         -c conda-forge -c bioconda \
         python=3.11 emu minimap2 "seqkit>=2.6" \
-        "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" -y
+        "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
+        pandas>=1.5 -y
     fi
     status=$?
     set -e
@@ -120,12 +121,14 @@ create_env_emu() {
         mamba create -n "${ENV_NAME}" \
           -c conda-forge -c bioconda \
           python=3.11 emu minimap2 "seqkit>=2.6" \
-          "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" -y
+          "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
+          pandas>=1.5 -y
       else
         conda create -n "${ENV_NAME}" \
           -c conda-forge -c bioconda \
           python=3.11 emu minimap2 "seqkit>=2.6" \
-          "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" -y
+          "r-base>=4.3" "r-ggplot2>=3.4" "r-data.table" \
+          pandas>=1.5 -y
       fi
       echo ">>> Created '${ENV_NAME}' with flexible priority." | tee -a "$RUN_LOG"
     else
@@ -313,128 +316,16 @@ run_emu_per_fastq() {
   done
 }
 
-# ----------------------------------------------------------
-# Collate abundance and mapping/alignment stats
-# ----------------------------------------------------------
-collate_emu_outputs() {
-  mkdir -p "${OUTDIR}/tables"
-
-  local abund_out="${OUTDIR}/tables/abundance_combined.tsv"
-  local map_out="${OUTDIR}/tables/mapping_stats.tsv"
-  : > "$abund_out"
-  : > "$map_out"
-
-  # headers
-  echo -e "file\trank\ttaxon\tabundance\tcount" >> "$abund_out"
-  echo -e "file\ttotal_reads\tassigned_reads\tassigned_frac\tunassigned_reads\tunassigned_frac" >> "$map_out"
-
-  shopt -s nullglob
-  for d in "${OUTDIR}/emu_runs/"*; do
-    [ -d "$d" ] || continue
-    local base
-    base=$(basename "$d")
-
-    # ------------------------------
-    # 1) ABUNDANCE / TAXON TABLE
-    # ------------------------------
-    # Try abundance.tsv (or abundance.tsv.gz). If no usable rows, fall back to counts.tsv.
-    # Normalize CRLF and tolerate header variants.
-    abund_file=""
-    if [ -s "${d}/abundance.tsv" ]; then
-      abund_file="${d}/abundance.tsv"
-    elif [ -s "${d}/abundance.tsv.gz" ]; then
-      abund_file="${d}/abundance.tsv.gz"
-    fi
-
-    have_rows=0
-    if [ -n "$abund_file" ]; then
-      if [[ "$abund_file" == *.gz ]]; then
-        reader="gzip -cd \"$abund_file\""
-      else
-        reader="cat \"$abund_file\""
-      fi
-
-      # Detect columns flexibly and emit: file, rank, taxon, abundance, count
-      eval $reader | sed 's/\r$//' | awk -v b="$base" -F'\t' '
-        BEGIN{OFS="\t"}
-        NR==1{
-          for(i=1;i<=NF;i++){
-            f=tolower($i)
-            if(f=="rank") R=i
-            if(f=="taxon"||f=="name"||f=="taxonomy"||f=="clade_name"||f=="lineage"||f=="species") T=i
-            if(f ~ /^abundance/) A=i
-            if(f=="count"||f=="reads"||f=="read_count") C=i
-          }
-          # If taxon absent, assume first non-numeric column is taxon
-          if(!T){
-            for(i=1;i<=NF;i++){
-              if($i+0==0 && tolower($i)!="0"){T=i;break}
-            }
-          }
-          next
-        }
-        NF>0{
-          r=(R? $R:"")
-          t=(T? $T:"")
-          a=(A? $A:"")
-          c=(C? $C:"")
-          if(t!=""){print b, r, t, a, c; n++}
-        }
-        END{if(n>0) printf("OK_ROWS=%d\n", n) > "/dev/stderr"}
-      ' >> "$abund_out" 2> >(awk -v b="$base" '/OK_ROWS=/{print ">>> [" b "] abundance rows: " $0}')
-      # Heuristic check whether we appended anything for this sample
-      if tail -n +2 "$abund_out" | awk -v b="$base" -F'\t' '$1==b{e=1} END{exit e?0:1}'; then
-        have_rows=1
-      fi
-    fi
-
-    if [ "$have_rows" -eq 0 ] && [ -s "${d}/counts.tsv" ]; then      
-      awk -v b="$base" -F'\t' '
-        BEGIN{OFS="\t"}
-        NR>1{
-          tax=$1; cnt=$2+0;
-          if(tolower(tax)=="unclassified" || tax=="") next
-          print b, "", tax, "", cnt
-        }
-      ' "${d}/counts.tsv" >> "$abund_out"
-    elif [ "$have_rows" -eq 0 ]; then
-      warn "No usable abundance/counts rows found in ${d}; skipping abundance rows for ${base}."
-    fi
-
-    # ------------------------------
-    # 2) MAPPING STATS
-    # ------------------------------
-    total=$(awk 'NR==2{print $2; exit}' "${d}/input_reads.tsv" 2>/dev/null || echo 0)
-
-    if [ -s "${d}/read_assignments.tsv" ]; then
-      assigned=$(awk 'BEGIN{c=0} NR>1{c++} END{print c}' "${d}/read_assignments.tsv")
-      unclassified=0
-      [ "$total" -gt 0 ] || total=$assigned
-    elif [ -s "${d}/counts.tsv" ]; then
-      unclassified=$(awk -F'\t' 'tolower($1)=="unclassified"{print $2+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
-      assigned=$(awk -F'\t' 'NR>1 && tolower($1)!="unclassified"{s+=$2} END{print s+0}' "${d}/counts.tsv" 2>/dev/null || echo 0)
-      [ "$total" -gt 0 ] || total=$((assigned + unclassified))
-    else
-      assigned=0; unclassified=0
-    fi
-
-    unassigned=$(( total - assigned ))
-    assigned_frac=$(awk -v a="$assigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", a/t; else print "0"}')
-    unassigned_frac=$(awk -v u="$unassigned" -v t="$total" 'BEGIN{if(t>0) printf "%.6f", u/t; else print "0"}')
-    echo -e "${base}\t${total}\t${assigned}\t${assigned_frac}\t${unassigned}\t${unassigned_frac}" >> "$map_out"
-  done
-  shopt -u nullglob
-
-  # Quick sanity note if we saw header-only abundance files
-  # (no exit; just a hint in the log)
-  if ! awk 'NR>1{exit 1} END{exit 0}' "$abund_out"; then
-    : # has rows
-  else
-    warn "Combined abundance table has only header. Check per-sample outputs."
-  fi
-
-  log "Wrote abundance table -> ${abund_out}"
-  log "Wrote mapping stats   -> ${map_out}"
+collate_with_python() {
+  local runs="${OUTDIR}/emu_runs"
+  local tables="${OUTDIR}/tables"
+  local dicts="${METADIR}"
+  local minprob="${MIN_ASSIGN_PROB:-0.5}"
+  python workflow/emu_collect.py \
+    --runs-dir "$runs" \
+    --outdir "$tables" \
+    --dictdir "$dicts" \
+    --min-prob "$minprob"
 }
 
 # ----------------------------------------------------------
@@ -510,7 +401,7 @@ time_function build_fastq_meta
 time_function run_emu_per_fastq
 
 # Collate + plot ----------------------------------------------------------
-time_function collate_emu_outputs
+time_function collate_with_python   
 time_function plot_genus_stacks
 
 # Guidance & final report -------------------------------------------------
