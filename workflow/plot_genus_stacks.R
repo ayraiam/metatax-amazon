@@ -103,9 +103,9 @@ lab_map <- setNames(lab_map_dt$rep_label, lab_map_dt$file_base)
 order_levels <- lab_map_dt[, file_base]
 dt[, file_factor := factor(file_base, levels = order_levels)]
 
-# ---- Strict Top-N + 'Other' (no tie spillover) --------------------------
+# ---- Strict Top-N + 'Other' (deterministic tie-break by genus) ----------
 N <- 20
-dt <- dt[order(file_base, -rel)]
+setorder(dt, file_base, -rel, genus)   
 dt[, idx := seq_len(.N), by = file_base]
 
 top_dt   <- dt[idx <= N, .(file_base, site, file_factor, genus, rel)]
@@ -160,11 +160,11 @@ plot_chunk <- function(sites_vec, idx){
                        expand = expansion(mult = c(0, 0.02))) +
     scale_x_discrete(labels = lab_map) +
     scale_fill_manual(values = fill_vals, drop = FALSE) +
-    theme_bw(base_size = 10) +
+    theme_classic(base_size = 10) +                                    
     theme(
       axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
-      panel.grid.major.x = element_blank(),
-      strip.background = element_rect(fill = "grey90"),
+      strip.background = element_rect(fill = "white"),                  
+      strip.text = element_text(size = 12, face = "bold"),              
       legend.position = "bottom"
     )
   ggsave(file.path(outdir, sprintf("emu_genus_stacks_%02d.png", idx)), p, width = 16, height = 9, dpi = 200)
