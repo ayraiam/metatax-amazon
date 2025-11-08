@@ -164,7 +164,7 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
     --mem="$EMU_MEM" \
     --time="$EMU_TIME" \
     --chdir="$WDIR" \
-    --export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}",LIMIT_FASTQS="${LIMIT_FASTQS:-1}" \  
+		--export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}",LIMIT_FASTQS="${LIMIT_FASTQS:-1}" \
     /bin/bash workflow/run_emu_amplicons.sh \
     1>"$EMU_OUT_LOG" \
     2>"$EMU_ERR_LOG"
