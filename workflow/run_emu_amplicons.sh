@@ -337,46 +337,68 @@ collate_emu_outputs() {
     # ------------------------------
     # 1) ABUNDANCE / TAXON TABLE
     # ------------------------------
-    # Prefer abundance.tsv if it has data rows; else fall back to counts.tsv
-    if [ -s "${d}/abundance.tsv" ] && [ "$(awk 'NR>1 && NF{c++} END{print c+0}' "${d}/abundance.tsv")" -gt 0 ]; then
-      # parse flexible header for rank/taxon/abundance/count
-      awk -v b="$base" -F'\t' '
+    # Try abundance.tsv (or abundance.tsv.gz). If no usable rows, fall back to counts.tsv.
+    # Normalize CRLF and tolerate header variants.
+    abund_file=""
+    if [ -s "${d}/abundance.tsv" ]; then
+      abund_file="${d}/abundance.tsv"
+    elif [ -s "${d}/abundance.tsv.gz" ]; then
+      abund_file="${d}/abundance.tsv.gz"
+    fi
+
+    have_rows=0
+    if [ -n "$abund_file" ]; then
+      if [[ "$abund_file" == *.gz ]]; then
+        reader="gzip -cd \"$abund_file\""
+      else
+        reader="cat \"$abund_file\""
+      fi
+
+      # Detect columns flexibly and emit: file, rank, taxon, abundance, count
+      eval $reader | sed 's/\r$//' | awk -v b="$base" -F'\t' '
         BEGIN{OFS="\t"}
         NR==1{
           for(i=1;i<=NF;i++){
-            f=tolower($i);
-            if(f=="rank") R=i;
-            else if(f=="taxon" || f=="name" || f=="taxonomy" || f=="clade_name" || f=="lineage" || f=="species") T=i;  
-            else if(f ~ /^abundance/) A=i;
-            else if(f=="count" || f=="reads" || f=="read_count") C=i;
+            f=tolower($i)
+            if(f=="rank") R=i
+            if(f=="taxon"||f=="name"||f=="taxonomy"||f=="clade_name"||f=="lineage"||f=="species") T=i
+            if(f ~ /^abundance/) A=i
+            if(f=="count"||f=="reads"||f=="read_count") C=i
+          }
+          # If taxon absent, assume first non-numeric column is taxon
+          if(!T){
+            for(i=1;i<=NF;i++){
+              if($i+0==0 && tolower($i)!="0"){T=i;break}
+            }
           }
           next
         }
-        {
+        NF>0{
           r=(R? $R:"")
           t=(T? $T:"")
           a=(A? $A:"")
           c=(C? $C:"")
-          print b, r, t, a, c
+          if(t!=""){print b, r, t, a, c; n++}
         }
-      ' "${d}/abundance.tsv" >> "$abund_out"
-    elif [ -s "${d}/counts.tsv" ]; then
-      # counts.tsv fallback: assume first col is a label (taxon or "Unclassified"), second is count
-      # We write taxon + count; leave abundance blank (R will compute from counts)
+        END{if(n>0) printf("OK_ROWS=%d\n", n) > "/dev/stderr"}
+      ' >> "$abund_out" 2> >(awk -v b="$base" '/OK_ROWS=/{print ">>> [" b "] abundance rows: " $0}')
+      # Heuristic check whether we appended anything for this sample
+      if tail -n +2 "$abund_out" | awk -v b="$base" -F'\t' '$1==b{e=1} END{exit e?0:1}'; then
+        have_rows=1
+      fi
+    fi
+
+    if [ "$have_rows" -eq 0 ] && [ -s "${d}/counts.tsv" ]; then      
       awk -v b="$base" -F'\t' '
         BEGIN{OFS="\t"}
-        NR==1{
-          # detect header or data; continue either way
-          next
-        }
-        {
+        NR>1{
           tax=$1; cnt=$2+0;
-          if(tolower(tax)=="unclassified" || tax=="") next  # skip unclassified for abundance table
+          if(tolower(tax)=="unclassified" || tax=="") next
           print b, "", tax, "", cnt
         }
       ' "${d}/counts.tsv" >> "$abund_out"
-    else
-      warn "No abundance-like file found in ${d}; skipping abundance rows for ${base}."
+    elif [ "$have_rows" -eq 0 ]; then
+      warn "No usable abundance/counts rows found in ${d}; skipping abundance rows for ${base}."
     fi
 
     # ------------------------------
