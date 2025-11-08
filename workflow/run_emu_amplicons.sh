@@ -219,11 +219,12 @@ discover_fastqs() {
   log "Found ${#FASTQS[@]} FASTQ files."
 }
 
-#limit to first 3 FASTQs for testing
-limit_to_three_fastqs() {
-  if [[ "${LIMIT_FASTQS:-1}" -eq 1 && ${#FASTQS[@]} -gt 3 ]]; then
-    log "Limiting run to first 3 FASTQs for this test. (Set LIMIT_FASTQS=0 to disable)"
-    FASTQS=( "${FASTQS[@]:0:3}" )
+# limit to N FASTQs for testing
+limit_to_n_fastqs() {
+  local N="${LIMIT_FASTQS:-0}"  # if 0, use all files
+  if [[ "$N" -gt 0 && ${#FASTQS[@]} -gt "$N" ]]; then
+    log "Limiting run to first ${N} FASTQs. (Set LIMIT_FASTQS=0 to disable)"
+    FASTQS=( "${FASTQS[@]:0:${N}}" )
   fi
   printf ">>> Using FASTQs:\n" | tee -a "$RUN_LOG"
   printf "    %s\n" "${FASTQS[@]}" | tee -a "$RUN_LOG"
@@ -394,14 +395,14 @@ time_function set_marker_flags
 # Input discovery ---------------------------------------------------------
 time_function discover_fastqs
 # limit to 3 for this test
-time_function limit_to_three_fastqs
+time_function limit_to_n_fastqs
 time_function build_fastq_meta
 
 # Emu runs (per FASTQ) ----------------------------------------------------
 time_function run_emu_per_fastq
 
 # Collate + plot ----------------------------------------------------------
-time_function collate_with_python   
+time_function collate_with_python
 time_function plot_genus_stacks
 
 # Guidance & final report -------------------------------------------------
