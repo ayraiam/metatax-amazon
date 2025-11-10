@@ -160,12 +160,14 @@ plot_chunk <- function(sites_vec, idx){
                        expand = expansion(mult = c(0, 0.02))) +
     scale_x_discrete(labels = lab_map) +
     scale_fill_manual(values = fill_vals, drop = FALSE) +
-    theme_classic(base_size = 10) +                                    
+    theme_classic(base_size = 10) +
     theme(
       axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
-      strip.background = element_rect(fill = "white"),                  
-      strip.text = element_text(size = 12, face = "bold"),              
-      legend.position = "bottom"
+      strip.background = element_rect(fill = "white"),
+      strip.text = element_text(size = 12, face = "bold"),
+      legend.position = "right",                      
+      legend.text = element_text(size = 8),           
+      legend.title = element_text(size = 9)           
     )
   ggsave(file.path(outdir, sprintf("emu_genus_stacks_%02d.png", idx)), p, width = 16, height = 9, dpi = 200)
   ggsave(file.path(outdir, sprintf("emu_genus_stacks_%02d.pdf", idx)), p, width = 16, height = 9)
