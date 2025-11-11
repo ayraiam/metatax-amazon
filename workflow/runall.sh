@@ -27,6 +27,10 @@ EMU_MEM=""
 EMU_DB_ITS_DIR=""
 EMU_DB_LSU_DIR=""
 
+# Batching controls
+OFFSET_FASTQS="${OFFSET_FASTQS:-0}"   
+# (LIMIT_FASTQS is read in run_emu_amplicons.sh via env)
+
 # --- Help message ---
 usage() {
   echo "Usage: bash workflow/runall.sh [options]"
@@ -40,6 +44,10 @@ usage() {
   echo "  --primer-fwd SEQ      Forward primer sequence (optional)"
   echo "  --primer-rev SEQ      Reverse primer sequence (optional)"
   echo "  --seq-summary PATH    Path to sequencing_summary.txt (optional)"
+  echo
+  echo "Batching:"
+  echo "  --offset-fastqs INT   Skip this many FASTQs from the start before selecting (default: 0)"
+  echo "                        (Set LIMIT_FASTQS=N via env to cap how many to run.)"
   echo
   echo "Stage control:"
   echo "  --no-qc               Skip libsQC step (run Emu only)"
@@ -68,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --primer-fwd) PRIMER_FWD="$2"; shift 2 ;;
     --primer-rev) PRIMER_REV="$2"; shift 2 ;;
     --seq-summary) SEQ_SUMMARY="$2"; shift 2 ;;
+    --offset-fastqs) OFFSET_FASTQS="$2"; shift 2 ;;
     --no-emu) RUN_EMU=0; shift 1 ;;
     --no-qc|--skip-libsQC) RUN_LIBSQC=0; shift 1 ;;
     --emu-partition) EMU_PARTITION="$2"; shift 2 ;;
@@ -123,6 +132,8 @@ echo "Time      : $TIME"
 echo "CPUs      : $CPUS"
 echo "Memory    : $MEM"
 echo "Work dir  : $WDIR"
+echo "Offset    : $OFFSET_FASTQS"
+echo "Limit     : ${LIMIT_FASTQS:-0} (env)"
 echo "============================================"
 echo
 
@@ -164,7 +175,7 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
     --mem="$EMU_MEM" \
     --time="$EMU_TIME" \
     --chdir="$WDIR" \
-		--export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}",LIMIT_FASTQS="${LIMIT_FASTQS:-1}" \
+    --export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}",LIMIT_FASTQS="${LIMIT_FASTQS:-0}",OFFSET_FASTQS="${OFFSET_FASTQS:-0}",SAVE_JSON="${SAVE_JSON:-0}" \
     /bin/bash workflow/run_emu_amplicons.sh \
     1>"$EMU_OUT_LOG" \
     2>"$EMU_ERR_LOG"
