@@ -160,6 +160,7 @@ def main():
     ap.add_argument("--dictdir", default="metadata", help="Where to dump JSON dicts")
     # kept for backward-compatibility, but ignored under fractional stats
     ap.add_argument("--min-prob", type=float, default=0.5, help="(Ignored) Kept for backward-compatibility.")
+    ap.add_argument("--no-json", action="store_true", help="Do not write JSON dict files.")
     args = ap.parse_args()
 
     if "--min-prob" in sys.argv:
@@ -221,13 +222,16 @@ def main():
         "file", "total_reads", "assigned_reads", "assigned_frac", "unassigned_reads", "unassigned_frac"
     ]).to_csv(map_out, sep="\t", index=False)
 
-    # Dump dicts
-    (dictdir / "abundance_dict.json").write_text(json.dumps(abundance_dict))
-    (dictdir / "read_assignment_dict.json").write_text(json.dumps(read_assign_dict))
+    # Dump dicts (optional)
+    if not args.no_json:
+        (dictdir / "abundance_dict.json").write_text(json.dumps(abundance_dict))
+        (dictdir / "read_assignment_dict.json").write_text(json.dumps(read_assign_dict))
+        sys.stderr.write(f">>> Wrote dicts           -> {dictdir/'abundance_dict.json'}, {dictdir/'read_assignment_dict.json'}\n")
+    else:
+        sys.stderr.write(">>> Skipped writing dict JSONs (--no-json)\n")
 
     sys.stderr.write(f">>> Wrote abundance table -> {abund_out}\n")
     sys.stderr.write(f">>> Wrote mapping stats   -> {map_out}\n")
-    sys.stderr.write(f">>> Wrote dicts           -> {dictdir/'abundance_dict.json'}, {dictdir/'read_assignment_dict.json'}\n")
 
 if __name__ == "__main__":
     main()
