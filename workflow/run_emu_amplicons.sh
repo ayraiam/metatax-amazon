@@ -219,13 +219,26 @@ discover_fastqs() {
   log "Found ${#FASTQS[@]} FASTQ files."
 }
 
-# limit to N FASTQs for testing
+# limit to an OFFSET + N window of FASTQs
 limit_to_n_fastqs() {
-  local N="${LIMIT_FASTQS:-0}"  # if 0, use all files
-  if [[ "$N" -gt 0 && ${#FASTQS[@]} -gt "$N" ]]; then
-    log "Limiting run to first ${N} FASTQs. (Set LIMIT_FASTQS=0 to disable)"
-    FASTQS=( "${FASTQS[@]:0:${N}}" )
+  local OFFSET="${OFFSET_FASTQS:-0}"
+  local N="${LIMIT_FASTQS:-0}"
+
+  # apply offset first
+  if [[ "$OFFSET" -gt 0 && ${#FASTQS[@]} -gt "$OFFSET" ]]; then
+    FASTQS=( "${FASTQS[@]:$OFFSET}" )
+  elif [[ "$OFFSET" -gt 0 ]]; then
+    FASTQS=()
   fi
+
+  # then cap to N
+  if [[ "$N" -gt 0 && ${#FASTQS[@]} -gt "$N" ]]; then
+    FASTQS=( "${FASTQS[@]:0:$N}" )
+    log "Limiting to ${N} FASTQs starting at offset ${OFFSET}."
+  else
+    log "Using ${#FASTQS[@]} FASTQs starting at offset ${OFFSET}."
+  fi
+
   printf ">>> Using FASTQs:\n" | tee -a "$RUN_LOG"
   printf "    %s\n" "${FASTQS[@]}" | tee -a "$RUN_LOG"
 }
