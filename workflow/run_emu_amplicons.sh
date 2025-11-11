@@ -322,11 +322,22 @@ collate_with_python() {
   local tables="${OUTDIR}/tables"
   local dicts="${METADIR}"
   local minprob="${MIN_ASSIGN_PROB:-0.5}"
-  python workflow/emu_collect.py \
-    --runs-dir "$runs" \
-    --outdir "$tables" \
-    --dictdir "$dicts" \
-    --min-prob "$minprob"
+  # Save JSON? 1=yes, 0=no (default no)
+  local save_json="${SAVE_JSON:-0}"
+
+  if [[ "$save_json" -eq 1 ]]; then
+    python workflow/emu_collect.py \
+      --runs-dir "$runs" \
+      --outdir "$tables" \
+      --dictdir "$dicts" \
+      --min-prob "$minprob"
+  else
+    python workflow/emu_collect.py \
+      --runs-dir "$runs" \
+      --outdir "$tables" \
+      --min-prob "$minprob" \
+      --no-json
+  fi
 }
 
 # ----------------------------------------------------------
