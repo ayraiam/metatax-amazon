@@ -82,8 +82,7 @@ If ITS/LSU DBs are not provided, only the 16S step will be performed.
 The 16S Emu database (bacteria + archaea) is auto-downloaded at first use.
 
 <pre>
-EXAMPLES
----------
+  
 # 1) Run both stages (QC + Emu) with default settings
 bash workflow/runall.sh
 
@@ -114,6 +113,29 @@ bash workflow/runall.sh --no-qc --emu-db-lsu /path/to/emu_silva_lsu
 # 9) Run Emu on a different FASTQ directory (skip QC)
 FASTQ_DIR_DEFAULT=/path/to/custom_filtered \
 bash workflow/runall.sh --no-qc --emu-time 10:00:00 --emu-cpus 12 --emu-mem 32G
+
+# 10) Run Emu in batches (e.g., split 76 FASTQs into 3 groups)
+#     Use LIMIT_FASTQS to cap how many to process,
+#     and --offset-fastqs to skip the ones already processed.
+
+#     First 25 files
+LIMIT_FASTQS=25 bash workflow/runall.sh \
+  --no-qc --offset-fastqs 0 \
+  --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
+
+#     Next 25 files
+LIMIT_FASTQS=25 bash workflow/runall.sh \
+  --no-qc --offset-fastqs 25 \
+  --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
+
+#     Last 26 files
+LIMIT_FASTQS=26 bash workflow/runall.sh \
+  --no-qc --offset-fastqs 50 \
+  --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
+
+# (Optional) To save JSON dictionaries for debugging or downstream parsing:
+SAVE_JSON=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --offset-fastqs 0
+
 </pre>
   
 <pre>
