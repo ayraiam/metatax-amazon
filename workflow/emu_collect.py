@@ -158,9 +158,9 @@ def main():
     ap.add_argument("--runs-dir", required=True, help="Path to results/emu_runs")
     ap.add_argument("--outdir", required=True, help="Where to write tables (e.g., results/tables)")
     ap.add_argument("--dictdir", default="metadata", help="Where to dump JSON dicts")
-    # kept for backward-compatibility, but ignored under fractional stats
     ap.add_argument("--min-prob", type=float, default=0.5, help="(Ignored) Kept for backward-compatibility.")
     ap.add_argument("--no-json", action="store_true", help="Do not write JSON dict files.")
+    ap.add_argument("--skip-assign", action="store_true", help="Skip loading read-assignment matrices.")
     args = ap.parse_args()
 
     if "--min-prob" in sys.argv:
@@ -173,21 +173,24 @@ def main():
     abundance_dict: Dict[str, Dict[str, List[Any]]] = {}
     read_assign_dict: Dict[str, Dict[str, Dict[str, float]]] = {}
 
-    all_abund = []
-    map_rows = []
+    all_abund, map_rows = [], []
 
     for sdir in sorted([p for p in runs_dir.glob("*") if p.is_dir()]):
         sname = sdir.name
 
-        # 1) abundance (raw, preserve all columns)
+        # 1) abundance (raw)
         abund_df, abund_d = load_abundance_raw(sdir)
         if not abund_df.empty:
             all_abund.append(abund_df)
         if abund_d:
             abundance_dict[sname] = abund_d
 
-        # 2) read-assignment distributions (+ nested dict)
-        assign_df, assign_d = load_read_assignment_distributions(sdir)
+        # 2) (optional) read-assignment distributions
+        if args.skip_assign:
+            assign_df, assign_d = pd.DataFrame(), {}
+        else:
+            assign_df, assign_d = load_read_assignment_distributions(sdir)
+
         if assign_d:
             read_assign_dict[sname] = assign_d[sname]
 
@@ -202,21 +205,20 @@ def main():
             except Exception:
                 pass
 
-        # 4) fractional mapping stats
+        # 4) fractional mapping stats (if skip-assign: becomes 0 assigned)
         stats = mapping_stats_fractional(assign_df, total_reads_sidecar)
         stats_row = {"file": sname, **stats}
         map_rows.append(stats_row)
 
-    # Write abundance_combined.tsv (wide; original columns kept)
+    # Write abundance_combined.tsv (unchanged)
     abund_out = outdir / "abundance_combined.tsv"
     if all_abund:
         comb = pd.concat(all_abund, ignore_index=True)
         comb.to_csv(abund_out, sep="\t", index=False)
     else:
-        # still emit file & a couple expected columns so downstream won't crash
         pd.DataFrame(columns=["file", "tax_id", "abundance", "species"]).to_csv(abund_out, sep="\t", index=False)
 
-    # Write mapping_stats.tsv
+    # Write mapping_stats.tsv (unchanged)
     map_out = outdir / "mapping_stats.tsv"
     pd.DataFrame(map_rows, columns=[
         "file", "total_reads", "assigned_reads", "assigned_frac", "unassigned_reads", "unassigned_frac"
