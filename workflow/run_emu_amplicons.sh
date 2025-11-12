@@ -38,6 +38,16 @@ ENABLE_16S=1
 ENABLE_ITS=0
 ENABLE_LSU=0
 
+# batch scoping (inherited from runall; with sane fallbacks)
+BATCH_TAG="${BATCH_TAG:-ball_n000}"
+RUNS_DIR="${RUNS_DIR:-${OUTDIR}/emu_runs_${BATCH_TAG}}"
+TABLES_DIR="${TABLES_DIR:-${OUTDIR}/tables_${BATCH_TAG}}"
+PLOTS_DIR="${PLOTS_DIR:-${OUTDIR}/plots_${BATCH_TAG}}"
+mkdir -p "$RUNS_DIR" "$TABLES_DIR" "$PLOTS_DIR"
+
+SAVE_ASSIGN="${SAVE_ASSIGN:-0}"
+SKIP_ASSIGN="${SKIP_ASSIGN:-$((1-SAVE_ASSIGN)))}"
+
 # ----------------------------------------------------------
 # Helper: time_function
 # ----------------------------------------------------------
@@ -207,7 +217,7 @@ set_marker_flags() {
 # FASTQ discovery (expects trimmed/filtered fastqs in results/filtered)
 # ----------------------------------------------------------
 FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}"
-FASTQ_MANIFEST="${FASTQ_MANIFEST:-${METADIR}/fastq_meta.tsv}"
+FASTQ_MANIFEST="${FASTQ_MANIFEST:-${METADIR}/fastq_meta.${BATCH_TAG}.tsv}"
 
 discover_fastqs() {
   log "Scanning ${FASTQ_DIR_DEFAULT}/ for filtered FASTQ files..."
@@ -291,19 +301,30 @@ run_emu_per_fastq() {
   for fq in "${FASTQS[@]}"; do
     local base
     base=$(basename "$fq"); base=${base%.fastq.gz}; base=${base%.fq.gz}; base=${base%.fastq}; base=${base%.fq}
-    local outdir="${OUTDIR}/emu_runs/${base}"
+    local outdir="${RUNS_DIR}/${base}"
     mkdir -p "$outdir"
 
     log "Running Emu (16S) on ${base} ..."
-    emu abundance \
-      --threads "$THREADS" \
-      --db "$EMU_DB16S_DIR" \
-      --output-dir "$outdir" \
-      --keep-counts \
-      --keep-read-assignments \
-      --output-unclassified \
-      --type "$EMU_TYPE" \
-      "$fq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG" || warn "Emu failed for ${base}"
+    if [[ "${SAVE_ASSIGN}" -eq 1 ]]; then                              # >>> CHANGED
+      emu abundance \
+        --threads "$THREADS" \
+        --db "$EMU_DB16S_DIR" \
+        --output-dir "$outdir" \
+        --keep-counts \
+        --keep-read-assignments \                                      # >>> CHANGED (conditional)
+        --output-unclassified \
+        --type "$EMU_TYPE" \
+        "$fq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG" || warn "Emu failed for ${base}"
+    else
+      emu abundance \
+        --threads "$THREADS" \
+        --db "$EMU_DB16S_DIR" \
+        --output-dir "$outdir" \
+        --keep-counts \
+        --output-unclassified \
+        --type "$EMU_TYPE" \
+        "$fq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG" || warn "Emu failed for ${base}"
+    fi
 
     # write a small per-sample info file with total reads for convenience
     echo -e "file\ttotal_reads" > "${outdir}/input_reads.tsv"
@@ -331,25 +352,34 @@ run_emu_per_fastq() {
 }
 
 collate_with_python() {
-  local runs="${OUTDIR}/emu_runs"
-  local tables="${OUTDIR}/tables"
+
+  local runs="${RUNS_DIR}"
+  local tables="${TABLES_DIR}"
   local dicts="${METADIR}"
   local minprob="${MIN_ASSIGN_PROB:-0.5}"
-  # Save JSON? 1=yes, 0=no (default no)
   local save_json="${SAVE_JSON:-0}"
+
+  mkdir -p "$tables"
+
+  local SKIP_FLAG=""
+  if [[ "${SKIP_ASSIGN}" -eq 1 ]]; then
+    SKIP_FLAG="--skip-assign"
+  fi
 
   if [[ "$save_json" -eq 1 ]]; then
     python workflow/emu_collect.py \
       --runs-dir "$runs" \
       --outdir "$tables" \
       --dictdir "$dicts" \
-      --min-prob "$minprob"
+      --min-prob "$minprob" \
+      ${SKIP_FLAG}
   else
     python workflow/emu_collect.py \
       --runs-dir "$runs" \
       --outdir "$tables" \
       --min-prob "$minprob" \
-      --no-json
+      --no-json \
+      ${SKIP_FLAG}
   fi
 }
 
@@ -357,8 +387,8 @@ collate_with_python() {
 # Call the R plotting script
 # ----------------------------------------------------------
 plot_genus_stacks() {
-  local abund="${OUTDIR}/tables/abundance_combined.tsv"
-  local outd="${OUTDIR}/plots"
+  local abund="${TABLES_DIR}/abundance_combined.tsv"
+  local outd="${PLOTS_DIR}"
   [ -s "$abund" ] || { warn "No abundance table at ${abund}; skipping plots."; return 0; }
   if command -v Rscript >/dev/null 2>&1; then
     Rscript workflow/plot_genus_stacks.R "$abund" "$outd"
@@ -393,7 +423,11 @@ log_run_report() {
     echo " DB16S: ${EMU_DB16S_DIR}"
     echo " DB_ITS: ${EMU_DB_ITS_DIR:-<none>}"
     echo " DB_LSU: ${EMU_DB_LSU_DIR:-<none>}"
-    echo " FASTQ manifest: ${METADIR}/fastq_meta.tsv"
+    echo " FASTQ manifest: ${FASTQ_MANIFEST}"
+    echo " Batch tag      : ${BATCH_TAG}"
+    echo " Runs dir       : ${RUNS_DIR}"
+    echo " Tables dir     : ${TABLES_DIR}"
+    echo " Plots dir      : ${PLOTS_DIR}"
     echo " Log file: ${RUN_LOG}"
     echo "=========================================================="
   } | tee -a "$RUN_LOG" > "${LOGDIR}/RUN_REPORT.txt"
