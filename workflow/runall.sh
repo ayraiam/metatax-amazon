@@ -28,8 +28,20 @@ EMU_DB_ITS_DIR=""
 EMU_DB_LSU_DIR=""
 
 # Batching controls
-OFFSET_FASTQS="${OFFSET_FASTQS:-0}"   
+OFFSET_FASTQS="${OFFSET_FASTQS:-0}"
 # (LIMIT_FASTQS is read in run_emu_amplicons.sh via env)
+
+# derive a stable batch tag from OFFSET/LIMIT for per-batch outputs
+LIMIT_FASTQS_SHOW="${LIMIT_FASTQS:-0}"                                # for echo only
+LIMIT_SAFE="${LIMIT_FASTQS:-0}"
+printf -v OFFSET_PAD "%03d" "${OFFSET_FASTQS}"
+printf -v LIMIT_PAD  "%03d" "${LIMIT_SAFE}"
+BATCH_TAG="${BATCH_TAG:-b${OFFSET_PAD}_n${LIMIT_PAD}}"                # e.g., b050_n026
+
+# per-batch output roots (used by Emu step)
+RUNS_DIR_DEFAULT="results/emu_runs_${BATCH_TAG}"
+TABLES_DIR_DEFAULT="results/tables_${BATCH_TAG}"
+PLOTS_DIR_DEFAULT="results/plots_${BATCH_TAG}"
 
 # --- Help message ---
 usage() {
@@ -133,7 +145,11 @@ echo "CPUs      : $CPUS"
 echo "Memory    : $MEM"
 echo "Work dir  : $WDIR"
 echo "Offset    : $OFFSET_FASTQS"
-echo "Limit     : ${LIMIT_FASTQS:-0} (env)"
+echo "Limit     : ${LIMIT_FASTQS_SHOW} (env)"
+echo "Batch tag : ${BATCH_TAG}"
+echo "Runs dir  : ${RUNS_DIR_DEFAULT}"
+echo "Tables dir: ${TABLES_DIR_DEFAULT}"
+echo "Plots dir : ${PLOTS_DIR_DEFAULT}"
 echo "============================================"
 echo
 
@@ -167,7 +183,11 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
   export MKL_NUM_THREADS="$EMU_CPUS"
   export NUMEXPR_NUM_THREADS="$EMU_CPUS"
 
-  srun \
+  # default behavior—do NOT keep massive read-assignment matrices
+  SAVE_ASSIGN="${SAVE_ASSIGN:-0}"            # 1 to keep Emu read-assign matrices
+  SKIP_ASSIGN="${SKIP_ASSIGN:-$((1-SAVE_ASSIGN))}"  # collector will skip loading them
+
+	srun \
     --partition="$EMU_PARTITION" \
     --nodes=1 \
     --ntasks=1 \
@@ -175,7 +195,7 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
     --mem="$EMU_MEM" \
     --time="$EMU_TIME" \
     --chdir="$WDIR" \
-    --export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}",LIMIT_FASTQS="${LIMIT_FASTQS:-0}",OFFSET_FASTQS="${OFFSET_FASTQS:-0}",SAVE_JSON="${SAVE_JSON:-0}" \
+    --export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}",LIMIT_FASTQS="${LIMIT_FASTQS:-0}",OFFSET_FASTQS="${OFFSET_FASTQS:-0}",BATCH_TAG="${BATCH_TAG}",RUNS_DIR="${RUNS_DIR_DEFAULT}",TABLES_DIR="${TABLES_DIR_DEFAULT}",PLOTS_DIR="${PLOTS_DIR_DEFAULT}",SAVE_JSON="${SAVE_JSON:-0}",SAVE_ASSIGN="${SAVE_ASSIGN}",SKIP_ASSIGN="${SKIP_ASSIGN}" \
     /bin/bash workflow/run_emu_amplicons.sh \
     1>"$EMU_OUT_LOG" \
     2>"$EMU_ERR_LOG"
