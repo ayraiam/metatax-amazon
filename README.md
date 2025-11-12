@@ -82,7 +82,8 @@ If ITS/LSU DBs are not provided, only the 16S step will be performed.
 The 16S Emu database (bacteria + archaea) is auto-downloaded at first use.
 
 <pre>
-  
+EXAMPLES:
+---------
 # 1) Run both stages (QC + Emu) with default settings
 bash workflow/runall.sh
 
@@ -93,7 +94,7 @@ bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
 bash workflow/runall.sh --no-emu --time 08:00:00 --cpus 16 --mem 32G
 
 # 4) Run only Emu (QC already done)
-#    By default, runs on the first 3 FASTQs for quick testing.
+#    By default, processes only the first 3 FASTQs for a quick test.
 bash workflow/runall.sh --no-qc --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
 
 # 5) Run Emu on ALL FASTQs (disable test limit)
@@ -114,21 +115,25 @@ bash workflow/runall.sh --no-qc --emu-db-lsu /path/to/emu_silva_lsu
 FASTQ_DIR_DEFAULT=/path/to/custom_filtered \
 bash workflow/runall.sh --no-qc --emu-time 10:00:00 --emu-cpus 12 --emu-mem 32G
 
-# 10) Run Emu in batches (e.g., split 76 FASTQs into 3 groups)
-#     Use LIMIT_FASTQS to cap how many to process,
+# 10) Run Emu in batches (recommended for large datasets)
+#     Use LIMIT_FASTQS to cap how many to process per run,
 #     and --offset-fastqs to skip the ones already processed.
+#     Each batch creates its own results folders:
+#       results/emu_runs_bXXX_nYYY/
+#       results/tables_bXXX_nYYY/
+#       results/plots_bXXX_nYYY/
 
-#     First 25 files
+#     ── First 25 files (FASTQs 0–24)
 LIMIT_FASTQS=25 bash workflow/runall.sh \
   --no-qc --offset-fastqs 0 \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-#     Next 25 files
+#     ── Next 25 files (FASTQs 25–49)
 LIMIT_FASTQS=25 bash workflow/runall.sh \
   --no-qc --offset-fastqs 25 \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-#     Last 26 files
+#     ── Last 26 files (FASTQs 50–75)
 LIMIT_FASTQS=26 bash workflow/runall.sh \
   --no-qc --offset-fastqs 50 \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
@@ -136,6 +141,8 @@ LIMIT_FASTQS=26 bash workflow/runall.sh \
 # (Optional) To save JSON dictionaries for debugging or downstream parsing:
 SAVE_JSON=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --offset-fastqs 0
 
+# (Optional) To retain the large read-assignment matrices (default: off):
+SAVE_ASSIGN=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --offset-fastqs 0
 </pre>
   
 <pre>
