@@ -375,7 +375,7 @@ p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
   labs(
     x = pc1_lab,
     y = pc2_lab,
-    title = "Bray–Curtis PCoA (Genus)"
+    title = "" #Bray–Curtis PCoA (Genus)
   ) +
   theme_base
 ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
