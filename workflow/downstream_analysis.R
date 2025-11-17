@@ -91,7 +91,8 @@ add_environment <- function(dt) {
     "L02_4350"  = "Igarape",  "NS2_550"  = "Igarape",  "L01_4500" = "Floresta",
     "L01_3500"  = "Floresta", "L01_3050" = "Igarape",  "L01_2500" = "Floresta",
     "L01_1500"  = "Floresta", "TRAV_0"   = "Igarape",  "L01_500"  = "Floresta",
-    "NS1_50"    = "Igarape"
+    "NS1_50"    = "Igarape",
+    "^PENEIRA"  = "Peneira"   
   )
   
   # Match using normalized filenames
@@ -246,6 +247,7 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
 # ==========================================================
 read_obj <- read_and_shape(infile)
 dt_raw   <- read_obj$raw
+
 fwrite(
   dt_raw,
   file = file.path(outdir, paste0(prefix, "_with_environment.tsv")),
@@ -314,8 +316,10 @@ theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank()
 env_colors <- c(
   "Campina"  = "#FFCC00",
   "Floresta" = "#99CC33",
-  "Igarape"  = "#3399FF"
+  "Igarape"  = "#3399FF",
+  "Peneira"  = "#FF9900"   
 )
+
 
 p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
