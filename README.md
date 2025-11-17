@@ -84,65 +84,94 @@ The 16S Emu database (bacteria + archaea) is auto-downloaded at first use.
 <pre>
 EXAMPLES:
 ---------
-# 1) Run both stages (QC + Emu) with default settings
+
+# 1) Run ALL stages (QC → Emu → Downstream) with default settings
 bash workflow/runall.sh
 
-# 2) Run both stages with custom resources
+
+# 2) Run ALL stages with custom resources
 bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
 
-# 3) Run only the QC stage
-bash workflow/runall.sh --no-emu --time 08:00:00 --cpus 16 --mem 32G
 
-# 4) Run only Emu (QC already done)
-#    By default, processes only the first 3 FASTQs for a quick test.
-bash workflow/runall.sh --no-qc --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
+# 3) Run ONLY the QC stage
+bash workflow/runall.sh --no-emu --no-downstream \
+  --time 08:00:00 --cpus 16 --mem 32G
 
-# 5) Run Emu on ALL FASTQs (disable test limit)
-LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
 
-# 6) Run both stages but allocate more resources to Emu
+# 4) Run ONLY Emu (QC already done)
+#    By default, processes only the first 3 FASTQs for a quick test
+bash workflow/runall.sh --no-qc --no-downstream \
+  --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
+
+
+# 5) Run Emu on ALL FASTQs (disable the default 3-file test limit)
+LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --no-downstream \
+  --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
+
+
+# 6) Run QC + Emu, but give Emu more resources
 bash workflow/runall.sh \
   --time 06:00:00 --cpus 8 --mem 32G \
   --emu-time 12:00:00 --emu-cpus 16 --emu-mem 64G
 
+
 # 7) Run Emu with a custom ITS database
-bash workflow/runall.sh --no-qc --emu-db-its /path/to/emu_unite_its
+bash workflow/runall.sh --no-qc --no-downstream \
+  --emu-db-its /path/to/emu_unite_its
+
 
 # 8) Run Emu with a custom LSU database
-bash workflow/runall.sh --no-qc --emu-db-lsu /path/to/emu_silva_lsu
+bash workflow/runall.sh --no-qc --no-downstream \
+  --emu-db-lsu /path/to/emu_silva_lsu
 
-# 9) Run Emu on a different FASTQ directory (skip QC)
+
+# 9) Run Emu on a custom FASTQ directory (skip QC)
 FASTQ_DIR_DEFAULT=/path/to/custom_filtered \
-bash workflow/runall.sh --no-qc --emu-time 10:00:00 --emu-cpus 12 --emu-mem 32G
+bash workflow/runall.sh --no-qc --no-downstream \
+  --emu-time 10:00:00 --emu-cpus 12 --emu-mem 32G
+
 
 # 10) Run Emu in batches (recommended for large datasets)
-#     Use LIMIT_FASTQS to cap how many to process per run,
-#     and --offset-fastqs to skip the ones already processed.
-#     Each batch creates its own results folders:
-#       results/emu_runs_bXXX_nYYY/
-#       results/tables_bXXX_nYYY/
-#       results/plots_bXXX_nYYY/
+#     LIMIT_FASTQS = number of FASTQs to process per batch
+#     --offset-fastqs = how many FASTQs to skip from the start
+#
+#     Each batch creates its own folders:
+#        results/emu_runs_bXXX_nYYY/
+#        results/tables_bXXX_nYYY/
+#        results/plots_bXXX_nYYY/
 
-#     ── First 25 files (FASTQs 0–24)
-LIMIT_FASTQS=25 bash workflow/runall.sh \
-  --no-qc --offset-fastqs 0 \
+# ---- First 25 files (0–24)
+LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream \
+  --offset-fastqs 0 \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-#     ── Next 25 files (FASTQs 25–49)
-LIMIT_FASTQS=25 bash workflow/runall.sh \
-  --no-qc --offset-fastqs 25 \
+# ---- Next 25 files (25–49)
+LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream \
+  --offset-fastqs 25 \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-#     ── Last 26 files (FASTQs 50–75)
-LIMIT_FASTQS=26 bash workflow/runall.sh \
-  --no-qc --offset-fastqs 50 \
+# ---- Last 26 files (50–75)
+LIMIT_FASTQS=26 bash workflow/runall.sh --no-qc --no-downstream \
+  --offset-fastqs 50 \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-# (Optional) To save JSON dictionaries for debugging or downstream parsing:
-SAVE_JSON=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --offset-fastqs 0
 
-# (Optional) To retain the large read-assignment matrices (default: off):
-SAVE_ASSIGN=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --offset-fastqs 0
+# (Optional) Save JSON dictionaries from Emu
+SAVE_JSON=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream
+
+
+# (Optional) Save read-assignment matrices (large files)
+SAVE_ASSIGN=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream
+
+# 11) Run ONLY the downstream diversity analysis
+#     (requires abundance_combined.tsv already generated)
+bash workflow/runall.sh --no-qc --no-emu \
+  --downstream-infile results/tables/abundance_combined.tsv \
+  --downstream-outdir results/plots \
+  --downstream-basename downstream
+
+# 12) Run QC + Emu, but skip downstream analysis
+bash workflow/runall.sh --no-downstream
 </pre>
   
 <pre>
