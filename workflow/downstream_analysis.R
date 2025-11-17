@@ -42,15 +42,19 @@ if (!file.exists(infile)) {
     # fallback: use current working directory + 'results'
     results_dir <- file.path(getwd(), "results")
   }
+  message(">>> Searching for batch tables under: ", results_dir)
   
-  batch_files <- list.files(
+  # 1) find all abundance_combined.tsv files recursively
+  all_abund <- list.files(
     path       = results_dir,
-    pattern    = "^tables_b.+/abundance_combined\\.tsv$",
+    pattern    = "^abundance_combined\\.tsv$",
     recursive  = TRUE,
     full.names = TRUE
   )
+  # 2) keep only those inside a tables_b* directory
+  batch_files <- all_abund[grepl("/tables_b", all_abund)]
   
-  if (length(batch_files) == 0) {
+  if (length(batch_files) == 0L) {
     stop("Could not find infile or any batch results/tables_b*/abundance_combined.tsv")
   }
   
