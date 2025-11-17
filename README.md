@@ -131,11 +131,11 @@ bash workflow/runall.sh --no-qc --no-downstream \
   --emu-time 10:00:00 --emu-cpus 12 --emu-mem 32G
 
 
-# 10) Run Emu in batches (recommended for large datasets)
+# 10) Run Emu in batches (recommended for very large datasets)
 #     LIMIT_FASTQS = number of FASTQs to process per batch
-#     --offset-fastqs = how many FASTQs to skip from the start
+#     --offset-fastqs = number of FASTQs to skip from the start
 #
-#     Each batch creates its own folders:
+#     Each batch creates its own directories:
 #        results/emu_runs_bXXX_nYYY/
 #        results/tables_bXXX_nYYY/
 #        results/plots_bXXX_nYYY/
@@ -155,16 +155,29 @@ LIMIT_FASTQS=26 bash workflow/runall.sh --no-qc --no-downstream \
   --offset-fastqs 50 \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-
 # (Optional) Save JSON dictionaries from Emu
 SAVE_JSON=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream
-
 
 # (Optional) Save read-assignment matrices (large files)
 SAVE_ASSIGN=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream
 
+# ---------------------------------------------------------
 # 11) Run ONLY the downstream diversity analysis
-#     (requires abundance_combined.tsv already generated)
+# ---------------------------------------------------------
+# NOTE:
+#   If the file you provide (via --downstream-infile) exists,
+#   the R script will use it directly.
+#
+#   If it does NOT exist, but you have batch folders such as:
+#       results/tables_b000_n025/abundance_combined.tsv
+#       results/tables_b025_n025/abundance_combined.tsv
+#       ...
+#   then downstream_analysis.R will automatically:
+#       - detect all batch abundance files
+#       - merge them into one master table
+#       - write it to: results/tables/abundance_combined.tsv
+#       - then continue normally.
+
 bash workflow/runall.sh --no-qc --no-emu \
   --downstream-infile results/tables/abundance_combined.tsv \
   --downstream-outdir results/plots \
