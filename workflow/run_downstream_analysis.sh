@@ -64,14 +64,19 @@ create_env() {
 }
 
 run_downstream() {
-  [ -s "$INFILE" ] || die "Input file not found: $INFILE"
+  # IMPORTANT: do NOT check that $INFILE exists here,
+  # the R script now auto-merges batch tables if it's missing.
+  log "Running downstream_analysis.R with:"
+  log "  infile  = $INFILE"
+  log "  outdir  = $OUTDIR"
+  log "  basename= $BASENAME"
 
   Rscript workflow/downstream_analysis.R \
     "$INFILE" \
     "$OUTDIR" \
     "$BASENAME"
 
-  log "Plots written to: $OUTDIR"
+  log "Plots + tables written to: $OUTDIR"
 }
 
 #Calling functions
