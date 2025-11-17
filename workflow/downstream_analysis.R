@@ -1,10 +1,10 @@
 #!/usr/bin/env Rscript
 # ==========================================================
-# downstream_analysis.R (No PCoA)
+# downstream_analysis.R
 # 1) Add 'environment' from filename rules
 # 2) Make environment-grouped stacked bars (Family & Genus)
-# 3) Alpha diversity (Shannon / Simpson)          
-# 4) Beta diversity (Bray–Curtis PCoA, Genus)   
+# 3) Alpha diversity (Shannon / Simpson)
+# 4) Beta diversity (Bray–Curtis PCoA, Genus)
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -15,7 +15,7 @@ suppressPackageStartupMessages({
   library(tidyr)
   library(dplyr)
   library(cowplot)
-  library(RColorBrewer)  
+  library(RColorBrewer)
   library(ggbeeswarm)
 })
 
@@ -28,8 +28,9 @@ outdir  <- args[2]
 prefix  <- ifelse(length(args) >= 3, args[3], "downstream")
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
-### if infile does NOT exist, merge batch tables_b*/abundance_combined.tsv
-
+# ==========================================================
+# 0) If infile does NOT exist, merge batch tables_b*/abundance_combined.tsv
+# ==========================================================
 if (!file.exists(infile)) {
   message(">>> Input file not found: ", infile)
   message(">>> Trying to merge batch abundance_combined.tsv files from results/tables_b*/ ...")
@@ -100,7 +101,7 @@ add_environment <- function(dt) {
 
 # ---------- Read + cleaning ----------
 read_and_shape <- function(path){
-  dt <- fread(path, sep="\t", header=TRUE, na.strings=c("", "NA"))
+  dt <- fread(path, sep = "\t", header = TRUE, na.strings = c("", "NA"))
   setnames(dt, tolower(names(dt)))
   if (!"file" %in% names(dt)) stop("Input must contain 'file' column")
   dt <- add_environment(dt)
@@ -108,7 +109,7 @@ read_and_shape <- function(path){
   # numeric abundance
   if (!"abundance" %in% names(dt)) dt[, abundance := NA_real_]
   suppressWarnings(dt[, abundance := as.numeric(abundance)])
-  if ("estimated_counts" %in% names(dt) && sum(dt$abundance, na.rm=TRUE)==0)
+  if ("estimated_counts" %in% names(dt) && sum(dt$abundance, na.rm = TRUE) == 0)
     dt[, abundance := as.numeric(estimated_counts)]
   dt <- dt[is.finite(abundance)]
   
@@ -118,43 +119,44 @@ read_and_shape <- function(path){
   # derive genus if missing
   if (all(is.na(dt$genus)) && "name" %in% names(dt))
     dt[, genus := sub("\\s.*$", "", name)]
-  dt[is.na(genus) | genus=="", genus := "No genus"]
+  dt[is.na(genus) | genus == "", genus := "No genus"]
   
   drop_pat <- "(?i)^(unmapped|mapped_unclassified)$"
   dt <- dt[!str_detect(coalesce(genus, ""), drop_pat)]
-  list(raw=dt)
+  list(raw = dt)
 }
 
 # ---------- Matrix builder ----------
 build_matrix <- function(dt, tax_col){
   stopifnot(tax_col %in% names(dt))
   long <- dt[, .(file, environment, taxon = get(tax_col), value = abundance)]
-  long[taxon=="" | is.na(taxon), taxon := paste0("No ", tax_col)]
-  long <- long[, .(value = sum(value, na.rm=TRUE)), by=.(file, environment, taxon)]
-  wide <- long |> select(file, taxon, value) |>
-    pivot_wider(names_from=taxon, values_from=value, values_fill=0) |>
+  long[taxon == "" | is.na(taxon), taxon := paste0("No ", tax_col)]
+  long <- long[, .(value = sum(value, na.rm = TRUE)), by = .(file, environment, taxon)]
+  wide <- long |>
+    select(file, taxon, value) |>
+    pivot_wider(names_from = taxon, values_from = value, values_fill = 0) |>
     as.data.table()
   meta <- unique(long[, .(file, environment)])
   setkey(meta, file); setkey(wide, file)
   mat <- as.data.frame(wide); rownames(mat) <- mat$file; mat$file <- NULL
-  list(mat=mat, meta=meta, long=long)
+  list(mat = mat, meta = meta, long = long)
 }
 
 # ---------- Helpers for plotting ----------
-collapse_topN_by_env <- function(long_df, N=20){
+collapse_topN_by_env <- function(long_df, N = 20){
   tmp <- copy(long_df)
-  tmp[, total := sum(value), by=file]
-  tmp[, rel := fifelse(total>0, value/total, 0)]
-  ranks <- tmp[, .(mean_rel = mean(rel, na.rm=TRUE)),
-               by=.(environment, taxon)] |>
+  tmp[, total := sum(value), by = file]
+  tmp[, rel := fifelse(total > 0, value / total, 0)]
+  ranks <- tmp[, .(mean_rel = mean(rel, na.rm = TRUE)),
+               by = .(environment, taxon)] |>
     arrange(environment, desc(mean_rel), taxon) |>
     group_by(environment) |>
     mutate(rank = row_number()) |>
     as.data.table()
   tmp <- merge(tmp, ranks[, .(environment, taxon, rank)],
-               by=c("environment","taxon"), all.x=TRUE)
+               by = c("environment", "taxon"), all.x = TRUE)
   tmp[, group := ifelse(rank <= N, taxon, "Other")]
-  tmp[, .(rel = sum(rel)), by=.(environment, file, group)] |>
+  tmp[, .(rel = sum(rel)), by = .(environment, file, group)] |>
     setnames("group", "taxon")
 }
 
@@ -182,16 +184,16 @@ legend_label_wrap <- function(x) {
   vapply(x, function(s) if (is.na(s)) s else gsub("\\s+", "\n", s), character(1))
 }
 
-make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N=20, title_rank="Genus"){
+make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_rank = "Genus"){
   if (!rank_col %in% names(dt_raw)) return(invisible(NULL))
-  if (all(is.na(dt_raw[[rank_col]])) || all(dt_raw[[rank_col]]=="")) return(invisible(NULL))
+  if (all(is.na(dt_raw[[rank_col]])) || all(dt_raw[[rank_col]] == "")) return(invisible(NULL))
   
   shaped <- build_matrix(dt_raw, tax_col = rank_col)
   long  <- shaped$long
-  collapsed <- collapse_topN_by_env(long, N=N)
+  collapsed <- collapse_topN_by_env(long, N = N)
   
   # order samples within each environment by file
-  collapsed[, file_fac := factor(file, levels = unique(file)), by=environment]
+  collapsed[, file_fac := factor(file, levels = unique(file)), by = environment]
   
   # 'Other' first and legend title set to rank
   lvl_info <- palette_with_other_first(collapsed$taxon)
@@ -204,12 +206,12 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N=20, title_rank
   p <- ggplot(collapsed, aes(x = file_fac, y = rel, fill = taxon)) +
     geom_col(width = 0.98) +  # bars nearly touching
     facet_grid(~ environment, scales = "free_x", space = "free_x") +
-    scale_y_continuous(labels = function(z) 100*z,
+    scale_y_continuous(labels = function(z) 100 * z,
                        expand = expansion(mult = c(0, 0.02))) +
     scale_fill_manual(
       values = lvl_info$values,
-      breaks = lvl_info$levels,                       
-      labels = legend_label_wrap(lvl_info$levels),    
+      breaks = lvl_info$levels,
+      labels = legend_label_wrap(lvl_info$levels),
       name   = title_rank,
       drop   = FALSE
     ) +
@@ -220,10 +222,8 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N=20, title_rank
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       panel.spacing.x = unit(0.02, "lines"),
-      # --- facet title style ---
       strip.text = facet_strip,
       strip.background = element_rect(fill = "white", colour = NA),
-      # --- remove bolds and box edges ---
       axis.title = element_text(face = "plain"),
       axis.text  = element_text(face = "plain"),
       legend.title = element_text(face = "plain"),
@@ -237,29 +237,31 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N=20, title_rank
   p
 }
 
-#Calling functions
 # ==========================================================
 # 0) Read + environment + cleaning
 # ==========================================================
 read_obj <- read_and_shape(infile)
 dt_raw   <- read_obj$raw
-fwrite(dt_raw, file=file.path(outdir,
-                              paste0(prefix, "_with_environment.tsv")), sep="\t")
+fwrite(
+  dt_raw,
+  file = file.path(outdir, paste0(prefix, "_with_environment.tsv")),
+  sep  = "\t"
+)
 
 # ==========================================================
 # 1) STACKED BARS
 # ==========================================================
 p_family <- make_env_stacks(
   dt_raw, "family",
-  file.path(outdir,paste0(prefix,"_stacks_family.png")),
-  file.path(outdir,paste0(prefix,"_stacks_family.pdf")),
-  N=20, "Family"
+  file.path(outdir, paste0(prefix, "_stacks_family.png")),
+  file.path(outdir, paste0(prefix, "_stacks_family.pdf")),
+  N = 20, title_rank = "Family"
 )
 p_genus <- make_env_stacks(
   dt_raw, "genus",
-  file.path(outdir,paste0(prefix,"_stacks_genus.png")),
-  file.path(outdir,paste0(prefix,"_stacks_genus.pdf")),
-  N=20, "Genus"
+  file.path(outdir, paste0(prefix, "_stacks_genus.png")),
+  file.path(outdir, paste0(prefix, "_stacks_genus.pdf")),
+  N = 20, title_rank = "Genus"
 )
 
 if (!is.null(p_family) && !is.null(p_genus)) {
@@ -275,7 +277,7 @@ if (!is.null(p_family) && !is.null(p_genus)) {
 }
 
 # ==========================================================
-# 2) ALPHA DIVERSITY (Shannon & Simpson only; no Chao1)
+# 2) ALPHA DIVERSITY (Shannon & Simpson only)
 # ==========================================================
 mx_rel  <- build_matrix(dt_raw, "genus")
 mat_rel <- mx_rel$mat
@@ -296,9 +298,11 @@ alpha_df <- data.table::data.table(
   Simpson = as.numeric(simpson)
 )
 alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
-data.table::fwrite(alpha_df,
-                   file = file.path(outdir, paste0(prefix, "_alpha_diversity.tsv")),
-                   sep  = "\t")
+data.table::fwrite(
+  alpha_df,
+  file = file.path(outdir, paste0(prefix, "_alpha_diversity.tsv")),
+  sep  = "\t"
+)
 
 # Common theme + colors
 theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
@@ -311,7 +315,7 @@ env_colors <- c(
 
 p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-  geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, 
+  geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
   geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
   labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
@@ -323,7 +327,7 @@ ggsave(file.path(outdir, paste0(prefix, "_alpha_shannon_env.png")),
 
 p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, color = environment)) +
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-  geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, 
+  geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
   geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
   labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
@@ -334,7 +338,7 @@ ggsave(file.path(outdir, paste0(prefix, "_alpha_simpson_env.png")),
        p_sp, width = 3, height = 5, dpi = 300)
 
 # ==========================================================
-# 3) BETA DIVERSITY – Bray–Curtis PCoA (Genus)       
+# 3) BETA DIVERSITY – Bray–Curtis PCoA (Genus)
 # ==========================================================
 bray <- vegan::vegdist(rel, method = "bray")
 
@@ -368,6 +372,5 @@ p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
   theme_base
 ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
        p_pcoa, width = 5, height = 4, dpi = 300)
-### ======================= END BETA BLOCK ==================  ### 
 
 message(">>> Done. Outputs in: ", outdir)
