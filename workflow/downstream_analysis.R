@@ -3,9 +3,8 @@
 # downstream_analysis.R
 # 1) Add 'environment' from filename rules
 # 2) Make environment-grouped stacked bars (Family & Genus)
-# 3) Alpha diversity (Shannon / Simpson)
+# 3) Alpha diversity (Shannon / Simpson) + pairwise Wilcoxon
 # 4) Beta diversity (Bray–Curtis PCoA, Genus)
-# 5) Mann–Whitney U tests on alpha diversity (stars per env)
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -170,7 +169,7 @@ palette_with_other_first <- function(levels_vec){
   lev <- unique(levels_vec)
   ordered <- c("Other", setdiff(lev, "Other"))
   
-  # Build a long discrete palette: Set1 → Set2 → Set3
+  # Build a long discrete palette: Set1 -> Set2 -> Set3
   get_pal <- function(name){
     maxn <- RColorBrewer::brewer.pal.info[name, "maxcolors"]
     RColorBrewer::brewer.pal(maxn, name)
@@ -256,55 +255,6 @@ fwrite(
 )
 
 # ==========================================================
-# 2a) Helper for alpha-div stars (Mann–Whitney, raw p)
-# ==========================================================
-compute_env_stars <- function(df, value_col) {
-  df <- df[!is.na(environment) & !is.na(get(value_col))]
-  envs <- sort(unique(df$environment))
-  if (length(envs) < 2) {
-    return(data.table(environment = envs, star = ""))
-  }
-  
-  cmb <- t(combn(envs, 2))
-  res_list <- apply(cmb, 1, function(pair_env) {
-    e1 <- pair_env[1]; e2 <- pair_env[2]
-    x <- df[environment == e1][[value_col]]
-    y <- df[environment == e2][[value_col]]
-    p <- tryCatch(
-      wilcox.test(x, y)$p.value,
-      error = function(e) NA_real_
-    )
-    data.table(env1 = e1, env2 = e2, p = p)
-  })
-  res <- rbindlist(res_list)
-  
-  # Long form: each env appears in all pairs it participates in
-  long_p <- rbind(
-    res[, .(environment = env1, p)],
-    res[, .(environment = env2, p)]
-  )
-  env_p <- long_p[
-    is.finite(p),
-    .(p_min = min(p, na.rm = TRUE)),
-    by = environment
-  ]
-  
-  # Map to stars (raw p, no adjustment)
-  env_p[, star := fifelse(
-    is.na(p_min) | !is.finite(p_min) | p_min > 0.05, "",
-    fifelse(p_min <= 0.001, "***",
-            fifelse(p_min <= 0.01, "**", "*")
-    )
-  )]
-  
-  # Ensure all environments are present
-  out <- data.table(environment = envs)
-  out <- merge(out, env_p[, .(environment, star)], by = "environment", all.x = TRUE)
-  out[is.na(star), star := ""]
-  out[]
-}
-
-# ==========================================================
 # 1) STACKED BARS
 # ==========================================================
 p_family <- make_env_stacks(
@@ -333,7 +283,7 @@ if (!is.null(p_family) && !is.null(p_genus)) {
 }
 
 # ==========================================================
-# 2) ALPHA DIVERSITY (Shannon & Simpson only)
+# 2) ALPHA DIVERSITY (Shannon & Simpson + pairwise Wilcoxon)
 # ==========================================================
 mx_rel  <- build_matrix(dt_raw, "genus")
 mat_rel <- mx_rel$mat
@@ -354,32 +304,95 @@ alpha_df <- data.table::data.table(
   Simpson = as.numeric(simpson)
 )
 alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
+
+# Make environment a factor for stable x positions
+alpha_df[, environment := factor(environment)]
+env_levels <- levels(alpha_df$environment)
+
 data.table::fwrite(
   alpha_df,
   file = file.path(outdir, paste0(prefix, "_alpha_diversity.tsv")),
   sep  = "\t"
 )
 
-# --- Compute per-environment stars (raw p) ---
-stars_sh <- compute_env_stars(alpha_df, "Shannon")
-stars_sp <- compute_env_stars(alpha_df, "Simpson")
+# ---------- Pairwise Wilcoxon tests (Mann–Whitney) ----------
+pairwise_wilcox <- function(df, value_col, metric_name) {
+  df <- df[!is.na(environment) & !is.na(get(value_col))]
+  envs <- levels(df$environment)
+  envs <- envs[envs %in% unique(df$environment)]
+  if (length(envs) < 2) {
+    return(data.table(env1 = character(0), env2 = character(0),
+                      metric = character(0), p_value = numeric(0)))
+  }
+  
+  cmb <- t(combn(envs, 2))
+  res_list <- apply(cmb, 1, function(pair_env) {
+    e1 <- pair_env[1]; e2 <- pair_env[2]
+    x <- df[environment == e1][[value_col]]
+    y <- df[environment == e2][[value_col]]
+    p <- tryCatch(
+      wilcox.test(x, y)$p.value,
+      error = function(e) NA_real_
+    )
+    data.table(env1 = e1, env2 = e2, metric = metric_name, p_value = p)
+  })
+  rbindlist(res_list)
+}
 
-# y-positions for stars
+pw_sh <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
+pw_sp <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
+
+pairwise_all <- rbindlist(list(pw_sh, pw_sp))
+data.table::fwrite(
+  pairwise_all,
+  file = file.path(outdir, paste0(prefix, "_alpha_pairwise_wilcox.tsv")),
+  sep  = "\t"
+)
+
+# ---------- Helpers for plotting bars + stars ----------
+p_to_star <- function(p) {
+  if (!is.finite(p) || is.na(p) || p > 0.05) "" else
+    if (p <= 0.001) "***" else if (p <= 0.01) "**" else "*"
+}
+
+# Significant comparisons only (p <= 0.05)
+sig_sh <- pw_sh[is.finite(p_value) & p_value <= 0.05]
+sig_sp <- pw_sp[is.finite(p_value) & p_value <= 0.05]
+
+# Add x positions for each env (factor index)
+env_to_x <- function(e) which(env_levels == e)
+
+if (nrow(sig_sh) > 0) {
+  sig_sh[, x1 := env_to_x(env1)]
+  sig_sh[, x2 := env_to_x(env2)]
+  sig_sh[, star := vapply(p_value, p_to_star, character(1))]
+}
+
+if (nrow(sig_sp) > 0) {
+  sig_sp[, x1 := env_to_x(env1)]
+  sig_sp[, x2 := env_to_x(env2)]
+  sig_sp[, star := vapply(p_value, p_to_star, character(1))]
+}
+
+# y-positions for bars
 sh_max <- max(alpha_df$Shannon, na.rm = TRUE)
 sh_range <- diff(range(alpha_df$Shannon, na.rm = TRUE))
 if (!is.finite(sh_range) || sh_range == 0) sh_range <- 1
-y_star_sh <- sh_max + 0.08 * sh_range
+base_sh <- sh_max + 0.08 * sh_range
+step_sh <- 0.06 * sh_range
 
 sp_max <- max(alpha_df$Simpson, na.rm = TRUE)
 sp_range <- diff(range(alpha_df$Simpson, na.rm = TRUE))
 if (!is.finite(sp_range) || sp_range == 0) sp_range <- 0.1
-y_star_sp <- sp_max + 0.08 * sp_range
+base_sp <- sp_max + 0.08 * sp_range
+step_sp <- 0.06 * sp_range
 
-ann_sh <- copy(stars_sh)
-ann_sh[, y := y_star_sh]
-
-ann_sp <- copy(stars_sp)
-ann_sp[, y := y_star_sp]
+if (nrow(sig_sh) > 0) {
+  sig_sh[, y := base_sh + step_sh * (seq_len(.N) - 1L)]
+}
+if (nrow(sig_sp) > 0) {
+  sig_sp[, y := base_sp + step_sp * (seq_len(.N) - 1L)]
+}
 
 # Common theme + colors
 theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
@@ -391,22 +404,30 @@ env_colors <- c(
   "Peneira"  = "#FF9900"
 )
 
+# ==========================================================
+# Plots with bars + asterisks
+# ==========================================================
 p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-  geom_text(
-    data = ann_sh[star != ""],
-    aes(x = environment, y = y, label = star),
-    inherit.aes = FALSE,
-    vjust = 0,
-    size = 3
-  ) +
-  expand_limits(y = y_star_sh) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9,
+               color = "black", fill = "white", show.legend = FALSE) +
+  # bars + stars for significant comparisons
+  { if (nrow(sig_sh) > 0) 
+    geom_segment(data = sig_sh,
+                 aes(x = x1, xend = x2, y = y, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.4) 
+    else NULL } +
+  { if (nrow(sig_sh) > 0)
+    geom_text(data = sig_sh,
+              aes(x = (x1 + x2)/2, y = y + step_sh * 0.2, label = star),
+              inherit.aes = FALSE, vjust = 0, size = 3)
+    else NULL } +
+  expand_limits(y = if (nrow(sig_sh) > 0) max(sig_sh$y + step_sh * 0.4) else sh_max) +
   labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
-  scale_fill_manual(values = env_colors) +
-  scale_color_manual(values = env_colors) +
+  scale_fill_manual(values = env_colors, drop = FALSE) +
+  scale_color_manual(values = env_colors, drop = FALSE) +
   theme_base
 ggsave(file.path(outdir, paste0(prefix, "_alpha_shannon_env.png")),
        p_sh, width = 3, height = 5, dpi = 300)
@@ -415,18 +436,23 @@ p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, c
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-  geom_text(
-    data = ann_sp[star != ""],
-    aes(x = environment, y = y, label = star),
-    inherit.aes = FALSE,
-    vjust = 0,
-    size = 3
-  ) +
-  expand_limits(y = y_star_sp) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9,
+               color = "black", fill = "white", show.legend = FALSE) +
+  # bars + stars for significant comparisons
+  { if (nrow(sig_sp) > 0) 
+    geom_segment(data = sig_sp,
+                 aes(x = x1, xend = x2, y = y, yend = y),
+                 inherit.aes = FALSE, linewidth = 0.4) 
+    else NULL } +
+  { if (nrow(sig_sp) > 0)
+    geom_text(data = sig_sp,
+              aes(x = (x1 + x2)/2, y = y + step_sp * 0.2, label = star),
+              inherit.aes = FALSE, vjust = 0, size = 3)
+    else NULL } +
+  expand_limits(y = if (nrow(sig_sp) > 0) max(sig_sp$y + step_sp * 0.4) else sp_max) +
   labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
-  scale_fill_manual(values = env_colors) +
-  scale_color_manual(values = env_colors) +
+  scale_fill_manual(values = env_colors, drop = FALSE) +
+  scale_color_manual(values = env_colors, drop = FALSE) +
   theme_base
 ggsave(file.path(outdir, paste0(prefix, "_alpha_simpson_env.png")),
        p_sp, width = 3, height = 5, dpi = 300)
@@ -457,7 +483,7 @@ data.table::fwrite(
 
 p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
   geom_point(size = 2.5, alpha = 0.9) +
-  scale_color_manual(values = env_colors, na.value = "grey70") +
+  scale_color_manual(values = env_colors, na.value = "grey70", drop = FALSE) +
   labs(
     x = pc1_lab,
     y = pc2_lab,
