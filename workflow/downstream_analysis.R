@@ -5,9 +5,7 @@
 # 2) Make environment-grouped stacked bars (Family & Genus)
 # 3) Alpha diversity (Shannon / Simpson)
 # 4) Beta diversity (Bray–Curtis PCoA, Genus)
-# 5) Stats:
-#    - Alpha: pairwise Mann–Whitney (Wilcoxon rank-sum) + asterisks on boxplots
-#    - Beta: PERMANOVA + betadisper
+# 5) Mann–Whitney U tests on alpha diversity (stars per env)
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -141,8 +139,8 @@ build_matrix <- function(dt, tax_col){
   long[taxon == "" | is.na(taxon), taxon := paste0("No ", tax_col)]
   long <- long[, .(value = sum(value, na.rm = TRUE)), by = .(file, environment, taxon)]
   wide <- long |>
-    dplyr::select(file, taxon, value) |>
-    tidyr::pivot_wider(names_from = taxon, values_from = value, values_fill = 0) |>
+    select(file, taxon, value) |>
+    pivot_wider(names_from = taxon, values_from = value, values_fill = 0) |>
     as.data.table()
   meta <- unique(long[, .(file, environment)])
   setkey(meta, file); setkey(wide, file)
@@ -258,6 +256,55 @@ fwrite(
 )
 
 # ==========================================================
+# 2a) Helper for alpha-div stars (Mann–Whitney, raw p)
+# ==========================================================
+compute_env_stars <- function(df, value_col) {
+  df <- df[!is.na(environment) & !is.na(get(value_col))]
+  envs <- sort(unique(df$environment))
+  if (length(envs) < 2) {
+    return(data.table(environment = envs, star = ""))
+  }
+  
+  cmb <- t(combn(envs, 2))
+  res_list <- apply(cmb, 1, function(pair_env) {
+    e1 <- pair_env[1]; e2 <- pair_env[2]
+    x <- df[environment == e1][[value_col]]
+    y <- df[environment == e2][[value_col]]
+    p <- tryCatch(
+      wilcox.test(x, y)$p.value,
+      error = function(e) NA_real_
+    )
+    data.table(env1 = e1, env2 = e2, p = p)
+  })
+  res <- rbindlist(res_list)
+  
+  # Long form: each env appears in all pairs it participates in
+  long_p <- rbind(
+    res[, .(environment = env1, p)],
+    res[, .(environment = env2, p)]
+  )
+  env_p <- long_p[
+    is.finite(p),
+    .(p_min = min(p, na.rm = TRUE)),
+    by = environment
+  ]
+  
+  # Map to stars (raw p, no adjustment)
+  env_p[, star := fifelse(
+    is.na(p_min) | !is.finite(p_min) | p_min > 0.05, "",
+    fifelse(p_min <= 0.001, "***",
+            fifelse(p_min <= 0.01, "**", "*")
+    )
+  )]
+  
+  # Ensure all environments are present
+  out <- data.table(environment = envs)
+  out <- merge(out, env_p[, .(environment, star)], by = "environment", all.x = TRUE)
+  out[is.na(star), star := ""]
+  out[]
+}
+
+# ==========================================================
 # 1) STACKED BARS
 # ==========================================================
 p_family <- make_env_stacks(
@@ -307,70 +354,32 @@ alpha_df <- data.table::data.table(
   Simpson = as.numeric(simpson)
 )
 alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
-
-# Ensure environment is factor (consistent order for plots + stats)
-alpha_df[, environment := factor(environment)]
-
 data.table::fwrite(
   alpha_df,
   file = file.path(outdir, paste0(prefix, "_alpha_diversity.tsv")),
   sep  = "\t"
 )
 
-# --- ALPHA STATS: pairwise Mann–Whitney (Wilcoxon rank-sum) + sig labels ----
+# --- Compute per-environment stars (raw p) ---
+stars_sh <- compute_env_stars(alpha_df, "Shannon")
+stars_sp <- compute_env_stars(alpha_df, "Simpson")
 
-# helper to convert pairwise.wilcox.test output into long df with labels and y positions
-build_sig_df <- function(df, value_col) {
-  df <- df[!is.na(get(value_col)) & !is.na(environment)]
-  if (length(unique(df$environment)) < 2L) return(NULL)
-  
-  pw <- pairwise.wilcox.test(df[[value_col]], df$environment, p.adjust.method = "BH")
-  m  <- pw$p.value
-  if (all(is.na(m))) return(NULL)
-  
-  comb <- which(!is.na(m), arr.ind = TRUE)
-  sig_dt <- data.table(
-    group1 = rownames(m)[comb[, "row"]],
-    group2 = colnames(m)[comb[, "col"]],
-    p_adj  = m[comb]
-  )
-  # asterisk labels
-  sig_dt[, label := fifelse(p_adj < 0.001, "***",
-                            fifelse(p_adj < 0.01, "**",
-                                    fifelse(p_adj < 0.05, "*", "")))]
-  sig_dt <- sig_dt[label != ""]
-  if (nrow(sig_dt) == 0L) return(NULL)
-  
-  # map group names to x positions
-  env_levels <- levels(df$environment)
-  xmap <- seq_along(env_levels); names(xmap) <- env_levels
-  sig_dt[, x1 := xmap[group1]]
-  sig_dt[, x2 := xmap[group2]]
-  
-  max_y <- max(df[[value_col]], na.rm = TRUE)
-  step  <- 0.07 * max_y
-  sig_dt[, y := max_y + step * seq_len(.N)]
-  sig_dt[, y_text := y + 0.02 * max_y]
-  sig_dt
-}
+# y-positions for stars
+sh_max <- max(alpha_df$Shannon, na.rm = TRUE)
+sh_range <- diff(range(alpha_df$Shannon, na.rm = TRUE))
+if (!is.finite(sh_range) || sh_range == 0) sh_range <- 1
+y_star_sh <- sh_max + 0.08 * sh_range
 
-sig_sh <- build_sig_df(alpha_df, "Shannon")
-sig_sp <- build_sig_df(alpha_df, "Simpson")
+sp_max <- max(alpha_df$Simpson, na.rm = TRUE)
+sp_range <- diff(range(alpha_df$Simpson, na.rm = TRUE))
+if (!is.finite(sp_range) || sp_range == 0) sp_range <- 0.1
+y_star_sp <- sp_max + 0.08 * sp_range
 
-if (!is.null(sig_sh)) {
-  data.table::fwrite(
-    sig_sh,
-    file = file.path(outdir, paste0(prefix, "_alpha_shannon_pairwise_wilcox.tsv")),
-    sep  = "\t"
-  )
-}
-if (!is.null(sig_sp)) {
-  data.table::fwrite(
-    sig_sp,
-    file = file.path(outdir, paste0(prefix, "_alpha_simpson_pairwise_wilcox.tsv")),
-    sep  = "\t"
-  )
-}
+ann_sh <- copy(stars_sh)
+ann_sh[, y := y_star_sh]
+
+ann_sp <- copy(stars_sp)
+ann_sp[, y := y_star_sp]
 
 # Common theme + colors
 theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
@@ -386,29 +395,19 @@ p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, c
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9,
-               color = "black", fill = "white", show.legend = FALSE) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
+  geom_text(
+    data = ann_sh[star != ""],
+    aes(x = environment, y = y, label = star),
+    inherit.aes = FALSE,
+    vjust = 0,
+    size = 3
+  ) +
+  expand_limits(y = y_star_sh) +
   labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
   scale_fill_manual(values = env_colors) +
   scale_color_manual(values = env_colors) +
   theme_base
-
-# add only significant comparisons (asterisks)
-if (!is.null(sig_sh)) {
-  p_sh <- p_sh +
-    geom_segment(
-      data = sig_sh,
-      aes(x = x1, xend = x2, y = y, yend = y),
-      inherit.aes = FALSE
-    ) +
-    geom_text(
-      data = sig_sh,
-      aes(x = (x1 + x2) / 2, y = y_text, label = label),
-      inherit.aes = FALSE,
-      size = 3
-    )
-}
-
 ggsave(file.path(outdir, paste0(prefix, "_alpha_shannon_env.png")),
        p_sh, width = 3, height = 5, dpi = 300)
 
@@ -416,33 +415,24 @@ p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, c
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9,
-               color = "black", fill = "white", show.legend = FALSE) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
+  geom_text(
+    data = ann_sp[star != ""],
+    aes(x = environment, y = y, label = star),
+    inherit.aes = FALSE,
+    vjust = 0,
+    size = 3
+  ) +
+  expand_limits(y = y_star_sp) +
   labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
   scale_fill_manual(values = env_colors) +
   scale_color_manual(values = env_colors) +
   theme_base
-
-if (!is.null(sig_sp)) {
-  p_sp <- p_sp +
-    geom_segment(
-      data = sig_sp,
-      aes(x = x1, xend = x2, y = y, yend = y),
-      inherit.aes = FALSE
-    ) +
-    geom_text(
-      data = sig_sp,
-      aes(x = (x1 + x2) / 2, y = y_text, label = label),
-      inherit.aes = FALSE,
-      size = 3
-    )
-}
-
 ggsave(file.path(outdir, paste0(prefix, "_alpha_simpson_env.png")),
        p_sp, width = 3, height = 5, dpi = 300)
 
 # ==========================================================
-# 3) BETA DIVERSITY – Bray–Curtis PCoA (Genus) + stats
+# 3) BETA DIVERSITY – Bray–Curtis PCoA (Genus)
 # ==========================================================
 bray <- vegan::vegdist(rel, method = "bray")
 
@@ -471,41 +461,10 @@ p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
   labs(
     x = pc1_lab,
     y = pc2_lab,
-    title = ""  # "Bray–Curtis PCoA (Genus)"
+    title = ""  # Bray–Curtis PCoA (Genus)
   ) +
   theme_base
 ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
        p_pcoa, width = 5, height = 4, dpi = 300)
-
-# --- BETA STATS: PERMANOVA + betadisper -------------------
-set.seed(2025)
-meta$environment <- factor(meta$environment)
-
-# PERMANOVA
-perm <- vegan::adonis2(bray ~ environment, data = meta, permutations = 999)
-perm_df <- as.data.frame(perm)
-data.table::fwrite(
-  as.data.table(perm_df, keep.rownames = "term"),
-  file = file.path(outdir, paste0(prefix, "_beta_permanova.tsv")),
-  sep  = "\t"
-)
-
-# betadisper (homogeneity of dispersion)
-bd <- vegan::betadisper(bray, meta$environment)
-
-bd_anova  <- as.data.frame(anova(bd))
-bd_perm   <- vegan::permutest(bd, permutations = 999)
-bd_perm_df <- as.data.frame(bd_perm$tab)
-
-data.table::fwrite(
-  as.data.table(bd_anova, keep.rownames = "term"),
-  file = file.path(outdir, paste0(prefix, "_beta_betadisper_anova.tsv")),
-  sep  = "\t"
-)
-data.table::fwrite(
-  as.data.table(bd_perm_df, keep.rownames = "term"),
-  file = file.path(outdir, paste0(prefix, "_beta_betadisper_permutest.tsv")),
-  sep  = "\t"
-)
 
 message(">>> Done. Outputs in: ", outdir)
