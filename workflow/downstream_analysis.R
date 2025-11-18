@@ -3,7 +3,7 @@
 # downstream_analysis.R
 # 1) Add 'environment' from filename rules
 # 2) Make environment-grouped stacked bars (Family & Genus)
-# 3) Alpha diversity (Shannon / Simpson) + pairwise Wilcoxon
+# 3) Alpha diversity (Shannon / Simpson)
 # 4) Beta diversity (Bray–Curtis PCoA, Genus)
 # ==========================================================
 
@@ -283,7 +283,7 @@ if (!is.null(p_family) && !is.null(p_genus)) {
 }
 
 # ==========================================================
-# 2) ALPHA DIVERSITY (Shannon & Simpson + pairwise Wilcoxon)
+# 2) ALPHA DIVERSITY (Shannon & Simpson only)
 # ==========================================================
 mx_rel  <- build_matrix(dt_raw, "genus")
 mat_rel <- mx_rel$mat
@@ -305,9 +305,11 @@ alpha_df <- data.table::data.table(
 )
 alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
 
-# Make environment a factor for stable x positions
-alpha_df[, environment := factor(environment)]
-env_levels <- levels(alpha_df$environment)
+### make environment an ordered factor (needed for bar positions)
+alpha_df[, environment := factor(
+  environment,
+  levels = c("Campina", "Floresta", "Igarape", "Peneira")
+)]
 
 data.table::fwrite(
   alpha_df,
@@ -315,7 +317,7 @@ data.table::fwrite(
   sep  = "\t"
 )
 
-# ---------- Pairwise Wilcoxon tests (Mann–Whitney) ----------
+### helper to compute pairwise Wilcoxon tests
 pairwise_wilcox <- function(df, value_col, metric_name) {
   df <- df[!is.na(environment) & !is.na(get(value_col))]
   envs <- levels(df$environment)
@@ -339,60 +341,53 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
   rbindlist(res_list)
 }
 
-pw_sh <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
-pw_sp <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
+### convert p-value to stars
+pval_to_stars <- function(p) {
+  ifelse(p < 0.001, "***",
+         ifelse(p < 0.01, "**",
+                ifelse(p < 0.05, "*", "ns")
+         )
+  )
+}
 
-pairwise_all <- rbindlist(list(pw_sh, pw_sp))
-data.table::fwrite(
-  pairwise_all,
+### build annotation dataframe (x positions, y heights, labels)
+build_sig_df <- function(sig_pw, df, value_col) {
+  if (nrow(sig_pw) == 0) return(NULL)
+  
+  env_levels <- levels(df$environment)
+  rng <- range(df[[value_col]], na.rm = TRUE)
+  y_min <- rng[1]; y_max <- rng[2]
+  y_step <- 0.05 * (y_max - y_min)
+  if (is.na(y_step) || y_step == 0) y_step <- 0.1
+  
+  sig_pw <- copy(sig_pw)[order(p_value)]
+  sig_pw[, idx := seq_len(.N)]
+  sig_pw[, `:=`(
+    x    = match(env1, env_levels),
+    xend = match(env2, env_levels),
+    y    = y_max + idx * y_step,
+    label = pval_to_stars(p_value)
+  )]
+  sig_pw
+}
+
+### compute ALL pairwise tests and write to TSV
+pw_shannon <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
+pw_simpson <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
+pw_all <- rbind(pw_shannon, pw_simpson)
+
+fwrite(
+  pw_all,
   file = file.path(outdir, paste0(prefix, "_alpha_pairwise_wilcox.tsv")),
   sep  = "\t"
 )
 
-# ---------- Helpers for plotting bars + stars ----------
-p_to_star <- function(p) {
-  if (!is.finite(p) || is.na(p) || p > 0.05) "" else
-    if (p <= 0.001) "***" else if (p <= 0.01) "**" else "*"
-}
+### subset ONLY significant tests for plotting
+sig_shannon <- pw_shannon[!is.na(p_value) & p_value < 0.05]
+sig_simpson <- pw_simpson[!is.na(p_value) & p_value < 0.05]
 
-# Significant comparisons only (p <= 0.05)
-sig_sh <- pw_sh[is.finite(p_value) & p_value <= 0.05]
-sig_sp <- pw_sp[is.finite(p_value) & p_value <= 0.05]
-
-# Add x positions for each env (factor index)
-env_to_x <- function(e) which(env_levels == e)
-
-if (nrow(sig_sh) > 0) {
-  sig_sh[, x1 := env_to_x(env1)]
-  sig_sh[, x2 := env_to_x(env2)]
-  sig_sh[, star := vapply(p_value, p_to_star, character(1))]
-}
-
-if (nrow(sig_sp) > 0) {
-  sig_sp[, x1 := env_to_x(env1)]
-  sig_sp[, x2 := env_to_x(env2)]
-  sig_sp[, star := vapply(p_value, p_to_star, character(1))]
-}
-
-# y-positions for bars
-sh_max <- max(alpha_df$Shannon, na.rm = TRUE)
-sh_range <- diff(range(alpha_df$Shannon, na.rm = TRUE))
-if (!is.finite(sh_range) || sh_range == 0) sh_range <- 1
-base_sh <- sh_max + 0.08 * sh_range
-step_sh <- 0.06 * sh_range
-
-sp_max <- max(alpha_df$Simpson, na.rm = TRUE)
-sp_range <- diff(range(alpha_df$Simpson, na.rm = TRUE))
-if (!is.finite(sp_range) || sp_range == 0) sp_range <- 0.1
-base_sp <- sp_max + 0.08 * sp_range
-step_sp <- 0.06 * sp_range
-
-if (nrow(sig_sh) > 0) {
-  sig_sh[, y := base_sh + step_sh * (seq_len(.N) - 1L)]
-}
-if (nrow(sig_sp) > 0) {
-  sig_sp[, y := base_sp + step_sp * (seq_len(.N) - 1L)]
-}
+sig_sh_df <- build_sig_df(sig_shannon, alpha_df, "Shannon")
+sig_sp_df <- build_sig_df(sig_simpson, alpha_df, "Simpson")
 
 # Common theme + colors
 theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
@@ -404,31 +399,31 @@ env_colors <- c(
   "Peneira"  = "#FF9900"
 )
 
-# ==========================================================
-# Plots with bars + asterisks
-# ==========================================================
 p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9,
-               color = "black", fill = "white", show.legend = FALSE) +
-  # bars + stars for significant comparisons
-  { if (nrow(sig_sh) > 0) 
-    geom_segment(data = sig_sh,
-                 aes(x = x1, xend = x2, y = y, yend = y),
-                 inherit.aes = FALSE, linewidth = 0.4) 
-    else NULL } +
-  { if (nrow(sig_sh) > 0)
-    geom_text(data = sig_sh,
-              aes(x = (x1 + x2)/2, y = y + step_sh * 0.2, label = star),
-              inherit.aes = FALSE, vjust = 0, size = 3)
-    else NULL } +
-  expand_limits(y = if (nrow(sig_sh) > 0) max(sig_sh$y + step_sh * 0.4) else sh_max) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
   labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
-  scale_fill_manual(values = env_colors, drop = FALSE) +
-  scale_color_manual(values = env_colors, drop = FALSE) +
+  scale_fill_manual(values = env_colors) +
+  scale_color_manual(values = env_colors) +
   theme_base
+
+### add bars + asterisks for significant Shannon comparisons
+if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
+  p_sh <- p_sh +
+    geom_segment(
+      data = sig_sh_df,
+      aes(x = x, xend = xend, y = y, yend = y),
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      data = sig_sh_df,
+      aes(x = (x + xend) / 2, y = y, label = label),
+      vjust = -0.3, size = 3, inherit.aes = FALSE
+    )
+}
+
 ggsave(file.path(outdir, paste0(prefix, "_alpha_shannon_env.png")),
        p_sh, width = 3, height = 5, dpi = 300)
 
@@ -436,24 +431,27 @@ p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, c
   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
                    alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9,
-               color = "black", fill = "white", show.legend = FALSE) +
-  # bars + stars for significant comparisons
-  { if (nrow(sig_sp) > 0) 
-    geom_segment(data = sig_sp,
-                 aes(x = x1, xend = x2, y = y, yend = y),
-                 inherit.aes = FALSE, linewidth = 0.4) 
-    else NULL } +
-  { if (nrow(sig_sp) > 0)
-    geom_text(data = sig_sp,
-              aes(x = (x1 + x2)/2, y = y + step_sp * 0.2, label = star),
-              inherit.aes = FALSE, vjust = 0, size = 3)
-    else NULL } +
-  expand_limits(y = if (nrow(sig_sp) > 0) max(sig_sp$y + step_sp * 0.4) else sp_max) +
+  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
   labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
-  scale_fill_manual(values = env_colors, drop = FALSE) +
-  scale_color_manual(values = env_colors, drop = FALSE) +
+  scale_fill_manual(values = env_colors) +
+  scale_color_manual(values = env_colors) +
   theme_base
+
+### add bars + asterisks for significant Simpson comparisons
+if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
+  p_sp <- p_sp +
+    geom_segment(
+      data = sig_sp_df,
+      aes(x = x, xend = xend, y = y, yend = y),
+      inherit.aes = FALSE
+    ) +
+    geom_text(
+      data = sig_sp_df,
+      aes(x = (x + xend) / 2, y = y, label = label),
+      vjust = -0.3, size = 3, inherit.aes = FALSE
+    )
+}
+
 ggsave(file.path(outdir, paste0(prefix, "_alpha_simpson_env.png")),
        p_sp, width = 3, height = 5, dpi = 300)
 
@@ -483,7 +481,7 @@ data.table::fwrite(
 
 p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
   geom_point(size = 2.5, alpha = 0.9) +
-  scale_color_manual(values = env_colors, na.value = "grey70", drop = FALSE) +
+  scale_color_manual(values = env_colors, na.value = "grey70") +
   labs(
     x = pc1_lab,
     y = pc2_lab,
