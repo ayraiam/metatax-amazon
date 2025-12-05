@@ -97,8 +97,7 @@ bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
 #      LSU_FASTA=/path/to/SILVA_138.1_LSURef_NR99_tax_silva.fasta.gz
 #
 #    This step does NOT run QC, Emu, or downstream analysis.
-bash workflow/runall.sh --only-build-marker-dbs \
-  --cpus 4 --mem 16G --time 04:00:00
+bash workflow/runall.sh --only-build-marker-dbs
 
 # 4) Run ONLY the QC stage
 bash workflow/runall.sh --no-emu --no-downstream \
