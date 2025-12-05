@@ -88,50 +88,56 @@ EXAMPLES:
 # 1) Run ALL stages (QC → Emu → Downstream) with default settings
 bash workflow/runall.sh
 
-
 # 2) Run ALL stages with custom resources
 bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
 
+# 3) Build ONLY the ITS/LSU marker databases (UNITE ITS + SILVA LSU)
+#    Uses default locations unless ITS_FASTA / LSU_FASTA are overridden:
+#      ITS_FASTA=/path/to/sh_general_release_dynamic_19.02.2025.fasta
+#      LSU_FASTA=/path/to/SILVA_138.1_LSURef_NR99_tax_silva.fasta.gz
+#
+#    This step does NOT run QC, Emu, or downstream analysis.
+bash workflow/runall.sh --only-build-marker-dbs
 
-# 3) Run ONLY the QC stage
+# 4) Run ONLY the QC stage
 bash workflow/runall.sh --no-emu --no-downstream \
   --time 08:00:00 --cpus 16 --mem 32G
 
 
-# 4) Run ONLY Emu (QC already done)
+# 5) Run ONLY Emu (QC already done)
 #    By default, processes only the first 3 FASTQs for a quick test
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
 
 
-# 5) Run Emu on ALL FASTQs (disable the default 3-file test limit)
+# 6) Run Emu on ALL FASTQs (disable the default 3-file test limit)
 LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-time 12:00:00 --emu-cpus 20 --emu-mem 32G
 
 
-# 6) Run QC + Emu, but give Emu more resources
+# 7) Run QC + Emu, but give Emu more resources
 bash workflow/runall.sh \
   --time 06:00:00 --cpus 8 --mem 32G \
   --emu-time 12:00:00 --emu-cpus 16 --emu-mem 64G
 
 
-# 7) Run Emu with a custom ITS database
+# 8) Run Emu with a custom ITS database
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-db-its /path/to/emu_unite_its
 
 
-# 8) Run Emu with a custom LSU database
+# 9) Run Emu with a custom LSU database
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-db-lsu /path/to/emu_silva_lsu
 
 
-# 9) Run Emu on a custom FASTQ directory (skip QC)
+# 10) Run Emu on a custom FASTQ directory (skip QC)
 FASTQ_DIR_DEFAULT=/path/to/custom_filtered \
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-time 10:00:00 --emu-cpus 12 --emu-mem 32G
 
 
-# 10) Run Emu in batches (recommended for very large datasets)
+# 11) Run Emu in batches (recommended for very large datasets)
 #     LIMIT_FASTQS = number of FASTQs to process per batch
 #     --offset-fastqs = number of FASTQs to skip from the start
 #
@@ -162,7 +168,7 @@ SAVE_JSON=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream
 SAVE_ASSIGN=1 LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream
 
 # ---------------------------------------------------------
-# 11) Run ONLY the downstream diversity analysis
+# 12) Run ONLY the downstream diversity analysis
 # ---------------------------------------------------------
 # NOTE:
 #   If the file you provide (via --downstream-infile) exists,
@@ -183,7 +189,7 @@ bash workflow/runall.sh --no-qc --no-emu \
   --downstream-outdir results/plots \
   --downstream-basename downstream
 
-# 12) Run QC + Emu, but skip downstream analysis
+# 13) Run QC + Emu, but skip downstream analysis
 bash workflow/runall.sh --no-downstream
 </pre>
   
