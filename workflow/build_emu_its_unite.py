@@ -40,6 +40,19 @@ def parse_unite_header(header: str):
         "ranks": ranks
     }
 
+# ==========================================================
+# More flexible detection of Ascomycota/Basidiomycota
+# ==========================================================
+def is_asco_or_basidio(phylum: str) -> bool:
+    """Return True if phylum belongs to Ascomycota or Basidiomycota,
+    allowing variants like Ascomycota_incertae_sedis or BasidiomycotaXYZ."""
+    if not phylum:
+        return False
+    return (
+        phylum.startswith("Ascomycota") or
+        phylum.startswith("Basidiomycota")
+    )
+
 def main():
     args = parse_args()
     fasta_path = Path(args.fasta)
@@ -78,8 +91,8 @@ def main():
         ranks = info["ranks"]
 
         phylum = ranks.get("p", "")
-        # keep only Ascomycota + Basidiomycota
-        if phylum not in ("Ascomycota", "Basidiomycota"):
+
+        if not is_asco_or_basidio(phylum):
             continue
 
         kingdom = ranks.get("k", "Fungi")
@@ -89,7 +102,6 @@ def main():
         genus   = ranks.get("g", "")
         species = ranks.get("s", "")
 
-        # Emu doesn't care if we keep underscores in species names
         seq_id = info["seq_id"]
 
         kept_seqs.append((seq_id, seq))
