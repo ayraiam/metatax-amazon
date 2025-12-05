@@ -19,6 +19,7 @@ SEQ_SUMMARY=""
 RUN_EMU=1
 RUN_LIBSQC=1
 RUN_DOWNSTREAM=1
+BUILD_MARKER_DBS=1
 
 EMU_PARTITION=""
 EMU_TIME=""
@@ -53,6 +54,7 @@ usage() {
   echo "  --no-qc               Skip libsQC"
   echo "  --no-emu              Skip Emu"
   echo "  --no-downstream       Skip downstream analysis"
+  echo "  --no-build-marker-dbs Do not attempt to build ITS/LSU marker databases"
   echo
   echo "Emu options:"
   echo "  --emu-partition STR   Emu partition (default: inherit libsQC)"
@@ -89,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --no-emu) RUN_EMU=0; shift 1 ;;
     --no-qc|--skip-libsQC) RUN_LIBSQC=0; shift 1 ;;
     --no-downstream) RUN_DOWNSTREAM=0; shift 1 ;;
+    --no-build-marker-dbs) BUILD_MARKER_DBS=0; shift 1 ;;
     --emu-partition) EMU_PARTITION="$2"; shift 2 ;;
     --emu-time) EMU_TIME="$2"; shift 2 ;;
     --emu-cpus) EMU_CPUS="$2"; shift 2 ;;
@@ -182,6 +185,24 @@ else
   echo ">>> Skipping libsQC (--no-qc)"
 fi
 
+### ITS/LSU DB build step (UNITE ITS + SILVA LSU) --------------------
+if [[ "$RUN_EMU" -eq 1 && "$BUILD_MARKER_DBS" -eq 1 ]]; then
+  echo ">>> Ensuring ITS/LSU Emu databases (UNITE ITS + SILVA LSU)..."
+  srun \
+    --partition="$PARTITION" \
+    --nodes=1 \
+    --ntasks=1 \
+    --cpus-per-task="$CPUS" \
+    --mem="$MEM" \
+    --time="$TIME" \
+    --chdir="$WDIR" \
+    --export=ALL,ENV_NAME="emu-env",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",ITS_FASTA="${ITS_FASTA:-}",LSU_FASTA="${LSU_FASTA:-}" \
+    /bin/bash workflow/run_build_ITS_LSU_dbs.sh
+else
+  echo ">>> Skipping ITS/LSU DB build (either --no-emu or --no-build-marker-dbs)"
+fi
+### ----------------------------------------------------------------------
+
 # --- Emu step ---
 if [[ "$RUN_EMU" -eq 1 ]]; then
   echo ">>> Launching Emu Amplicons..."
@@ -226,6 +247,6 @@ fi
 
 echo
 echo ">>> Jobs finished. Check logs:"
-[ "$RUN_LIBSQC" -eq 1 ]    && echo "  $OUT_LOG / $ERR_LOG"
-[ "$RUN_EMU" -eq 1 ]       && echo "  $EMU_OUT_LOG / $EMU_ERR_LOG"
-[ "$RUN_DOWNSTREAM" -eq 1 ]&& echo "  $DOWN_OUT_LOG / $DOWN_ERR_LOG"
+[ "$RUN_LIBSQC" -eq 1 ]     && echo "  $OUT_LOG / $ERR_LOG"
+[ "$RUN_EMU" -eq 1 ]        && echo "  $EMU_OUT_LOG / $EMU_ERR_LOG"
+[ "$RUN_DOWNSTREAM" -eq 1 ] && echo "  $DOWN_OUT_LOG / $DOWN_ERR_LOG"
