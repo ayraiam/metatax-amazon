@@ -62,7 +62,7 @@ def parse_silva_header(hdr: str):
 
 def is_fungal_asco_basidio(tokens):
     """
-    ### CHANGED: more flexible detection of fungal Asco/Basidio
+    more flexible detection of fungal Asco/Basidio
 
     We keep the record if:
       - One of the tokens is 'Fungi' (or ends with 'Fungi')
