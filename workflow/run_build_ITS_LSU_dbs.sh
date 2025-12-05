@@ -21,7 +21,7 @@ ITS_FASTA="${ITS_FASTA:-refdb/unite_its_2025/sh_general_release_dynamic_19.02.20
 EMU_DB_LSU_DIR="${EMU_DB_LSU_DIR:-refdb/silva_lsu_138/lsu_silva_asco_basi}"
 
 # SILVA LSU taxonomy FASTA (with taxonomy in header)
-LSU_FASTA="${LSU_FASTA:-refdb/silva_lsu_138/SILVA_138.1_LSURef_NR99_tax_silva.fasta.gz}"
+LSU_FASTA="${LSU_FASTA:-refdb/silva_lsu_138/SILVA_138.2_LSURef_NR99_tax_silva.fasta.gz}"
 
 # Conda env name for Emu (same as run_emu_amplicons.sh)
 ENV_NAME="${ENV_NAME:-emu-env}"
