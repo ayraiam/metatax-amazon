@@ -20,13 +20,8 @@ def parse_args():
 
 def parse_silva_header(hdr: str):
     """
-    Example SILVA header (one possible style):
-    >AF177760.1.1752 Eukaryota;Fungi;Ascomycota;Saccharomycetes;...
-
-    We do NOT assume fixed positions; we return:
-      - seq_id
-      - ranks dict (best-effort mapping to kingdom/phylum/...)
-      - tokens: the full list of taxonomy tokens
+    Example SILVA header:
+    >AC152122.8318.11813 Eukaryota;Amorphea;Obazoa;Opisthokonta;Nucletmycea;Fungi;Dikarya;Ascomycota;Saccharomycotina;Saccharomycetes;Saccharomycetales;Debaryomycetaceae;Scheffersomyces;Scheffersomyces stipitis
     """
     hdr = hdr.lstrip(">").strip()
     if not hdr:
@@ -36,58 +31,42 @@ def parse_silva_header(hdr: str):
     tax_str = parts[1] if len(parts) > 1 else ""
 
     if not tax_str:
-        return seq_id, {}, []
+        return seq_id, {}, tax_str
 
     tokens = [t.strip() for t in tax_str.split(";") if t.strip()]
 
-    # Best-effort mapping: we keep the first 7 tokens as
-    # kingdom, phylum, class, order, family, genus, species
+    # ---------------------------------------------------------
+    # find 'Fungi' in the chain and use offsets from there
+    # ---------------------------------------------------------
     ranks = {}
-    if len(tokens) >= 1:
-        ranks["kingdom"] = tokens[0]
-    if len(tokens) >= 2:
-        ranks["phylum"]  = tokens[1]
-    if len(tokens) >= 3:
-        ranks["class"]   = tokens[2]
-    if len(tokens) >= 4:
-        ranks["order"]   = tokens[3]
-    if len(tokens) >= 5:
-        ranks["family"]  = tokens[4]
-    if len(tokens) >= 6:
-        ranks["genus"]   = tokens[5]
-    if len(tokens) >= 7:
-        ranks["species"] = tokens[6]
+    try:
+        k_idx = tokens.index("Fungi")
+    except ValueError:
+        # not fungal at all
+        return seq_id, ranks, tax_str
 
-    return seq_id, ranks, tokens
+    fungal = tokens[k_idx:]                    # ['Fungi','Dikarya','Ascomycota',...]
+    if not fungal:
+        return seq_id, ranks, tax_str
 
-def is_fungal_asco_basidio(tokens):
-    """
-    more flexible detection of fungal Asco/Basidio
+    # kingdom = Fungi
+    ranks["kingdom"] = fungal[0]
 
-    We keep the record if:
-      - One of the tokens is 'Fungi' (or ends with 'Fungi')
-      - AND one of the tokens is 'Ascomycota' or 'Basidiomycota'
-    """
-    if not tokens:
-        return False, "", ""
+    # phylum, class, order, family, genus, species with safe indexing
+    if len(fungal) > 2:
+        ranks["phylum"] = fungal[2]            # e.g. Ascomycota
+    if len(fungal) > 4:
+        ranks["class"]  = fungal[4]            # e.g. Saccharomycetes
+    if len(fungal) > 5:
+        ranks["order"]  = fungal[5]            # e.g. Saccharomycetales
+    if len(fungal) > 6:
+        ranks["family"] = fungal[6]            # e.g. Debaryomycetaceae
+    if len(fungal) > 7:
+        ranks["genus"]  = fungal[7]            # e.g. Scheffersomyces
+    if len(fungal) > 8:
+        ranks["species"]= fungal[8]            # e.g. Scheffersomyces stipitis
 
-    # detect 'Fungi' anywhere
-    fungi_like = [t for t in tokens if t == "Fungi" or t.endswith("Fungi")]
-    if not fungi_like:
-        return False, "", ""
-
-    # detect phylum token
-    phylum = None
-    for t in tokens:
-        if t in ("Ascomycota", "Basidiomycota"):
-            phylum = t
-            break
-
-    if phylum is None:
-        return False, "", ""
-
-    kingdom = fungi_like[0]
-    return True, kingdom, phylum
+    return seq_id, ranks, tax_str
 
 def main():
     args = parse_args()
@@ -99,10 +78,13 @@ def main():
         sys.exit(1)
 
     kept = []
+    # ---------------------------------------------------------
+    # NEW: deduplicated taxonomy using dict
+    # ---------------------------------------------------------
+    taxon2id = {}
     tax_rows = []
     seq2tax_rows = []
-
-    tax_id = 1
+    tax_id_counter = 1
 
     with open_maybe_gz(fasta_path) as fh:
         cur_h = None
@@ -114,64 +96,99 @@ def main():
             if line.startswith(">"):
                 if cur_h is not None:
                     # process previous
-                    seq_id, ranks, tokens = parse_silva_header(cur_h)
+                    seq_id, ranks, _ = parse_silva_header(cur_h)
+                    kingdom = ranks.get("kingdom", "")
+                    phylum  = ranks.get("phylum", "")
 
-                    keep, kingdom, phylum = is_fungal_asco_basidio(tokens)
-                    if keep:
+                    # keep only fungal Ascomycota / Basidiomycota
+                    if kingdom == "Fungi" and phylum in ("Ascomycota", "Basidiomycota"):
                         seq = "".join(cur_seq)
                         kept.append((seq_id, seq))
 
-                        # override or fill ranks using detected kingdom/phylum
-                        ranks["kingdom"] = kingdom
-                        ranks["phylum"]  = phylum
+                        species = ranks.get("species", "")
+                        genus   = ranks.get("genus", "")
+                        family  = ranks.get("family", "")
+                        order   = ranks.get("order", "")
+                        clazz   = ranks.get("class", "")
+                        # phylum, kingdom already defined
 
-                        tax_rows.append([
-                            str(tax_id),
-                            ranks.get("species", ""),
-                            ranks.get("genus", ""),
-                            ranks.get("family", ""),
-                            ranks.get("order", ""),
-                            ranks.get("class", ""),
-                            ranks.get("phylum", ""),
-                            ranks.get("kingdom", "")
-                        ])
-                        seq2tax_rows.append([seq_id, str(tax_id)])
-                        tax_id += 1
+                        tax_key = (
+                            species,
+                            genus,
+                            family,
+                            order,
+                            clazz,
+                            phylum,
+                            kingdom,
+                        )
+
+                        tid = taxon2id.get(tax_key)
+                        if tid is None:
+                            tid = tax_id_counter
+                            tax_id_counter += 1
+                            taxon2id[tax_key] = tid
+                            tax_rows.append([
+                                str(tid),
+                                species,
+                                genus,
+                                family,
+                                order,
+                                clazz,
+                                phylum,
+                                kingdom
+                            ])
+
+                        seq2tax_rows.append([seq_id, str(tid)])
 
                 cur_h = line
                 cur_seq = []
             else:
                 cur_seq.append(line)
-
         # final record
         if cur_h is not None:
-            seq_id, ranks, tokens = parse_silva_header(cur_h)
-            keep, kingdom, phylum = is_fungal_asco_basidio(tokens)
-            if keep:
+            seq_id, ranks, _ = parse_silva_header(cur_h)
+            kingdom = ranks.get("kingdom", "")
+            phylum  = ranks.get("phylum", "")
+            if kingdom == "Fungi" and phylum in ("Ascomycota", "Basidiomycota"):
                 seq = "".join(cur_seq)
                 kept.append((seq_id, seq))
 
-                ranks["kingdom"] = kingdom
-                ranks["phylum"]  = phylum
+                species = ranks.get("species", "")
+                genus   = ranks.get("genus", "")
+                family  = ranks.get("family", "")
+                order   = ranks.get("order", "")
+                clazz   = ranks.get("class", "")
 
-                tax_rows.append([
-                    str(tax_id),
-                    ranks.get("species", ""),
-                    ranks.get("genus", ""),
-                    ranks.get("family", ""),
-                    ranks.get("order", ""),
-                    ranks.get("class", ""),
-                    ranks.get("phylum", ""),
-                    ranks.get("kingdom", "")
-                ])
-                seq2tax_rows.append([seq_id, str(tax_id)])
-                tax_id += 1
+                tax_key = (
+                    species,
+                    genus,
+                    family,
+                    order,
+                    clazz,
+                    phylum,
+                    kingdom,
+                )
+
+                tid = taxon2id.get(tax_key)
+                if tid is None:
+                    tid = tax_id_counter
+                    tax_id_counter += 1
+                    taxon2id[tax_key] = tid
+                    tax_rows.append([
+                        str(tid),
+                        species,
+                        genus,
+                        family,
+                        order,
+                        clazz,
+                        phylum,
+                        kingdom
+                    ])
+
+                seq2tax_rows.append([seq_id, str(tid)])
 
     if not kept:
-        sys.stderr.write(
-            "No fungal Ascomycota/Basidiomycota sequences found in SILVA LSU FASTA "
-            "(after relaxed parsing). Check the FASTA headers / version.\n"
-        )
+        sys.stderr.write("No fungal Ascomycota/Basidiomycota sequences found in SILVA LSU FASTA.\n")
         sys.exit(1)
 
     out_fasta   = out_prefix.with_suffix(".fasta")
