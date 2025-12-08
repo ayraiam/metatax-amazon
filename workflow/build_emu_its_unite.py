@@ -40,19 +40,6 @@ def parse_unite_header(header: str):
         "ranks": ranks
     }
 
-# ==========================================================
-# More flexible detection of Ascomycota/Basidiomycota
-# ==========================================================
-def is_asco_or_basidio(phylum: str) -> bool:
-    """Return True if phylum belongs to Ascomycota or Basidiomycota,
-    allowing variants like Ascomycota_incertae_sedis or BasidiomycotaXYZ."""
-    if not phylum:
-        return False
-    return (
-        phylum.startswith("Ascomycota") or
-        phylum.startswith("Basidiomycota")
-    )
-
 def main():
     args = parse_args()
     fasta_path = Path(args.fasta)
@@ -81,44 +68,65 @@ def main():
         if cur_h is not None:
             seqs.append((cur_h, "".join(cur_seq)))
 
-    kept_seqs = []
+    # ---------------------------------------------------------
+    # deduplicated taxonomy with a dict
+    # ---------------------------------------------------------
+    taxon2id = {}
     tax_rows = []
     seq2tax_rows = []
+    tax_id_counter = 1
 
-    tax_id = 1
+    kept_seqs = []         # sequences that pass Asco/Basidio filter
+
     for hdr, seq in seqs:
         info = parse_unite_header(hdr)
         ranks = info["ranks"]
 
-        phylum = ranks.get("p", "")
-
-        if not is_asco_or_basidio(phylum):
-            continue
-
-        kingdom = ranks.get("k", "Fungi")
+        # Map UNITE ranks to explicit variables
+        kingdom = ranks.get("k", "")
+        phylum  = ranks.get("p", "")
         clazz   = ranks.get("c", "")
         order   = ranks.get("o", "")
         family  = ranks.get("f", "")
         genus   = ranks.get("g", "")
         species = ranks.get("s", "")
 
+        # keep only Ascomycota + Basidiomycota
+        if phylum not in ("Ascomycota", "Basidiomycota"):
+            continue
+
         seq_id = info["seq_id"]
 
-        kept_seqs.append((seq_id, seq))
-
-        tax_rows.append([
-            str(tax_id),
+        # key for taxonomy de-duplication
+        tax_key = (
             species,
             genus,
             family,
             order,
             clazz,
             phylum,
-            kingdom
-        ])
-        seq2tax_rows.append([seq_id, str(tax_id)])
+            kingdom,
+        )
 
-        tax_id += 1
+        # assign or reuse tax_id
+        tid = taxon2id.get(tax_key)
+        if tid is None:
+            tid = tax_id_counter
+            tax_id_counter += 1
+            taxon2id[tax_key] = tid
+            tax_rows.append([
+                str(tid),
+                species,
+                genus,
+                family,
+                order,
+                clazz,
+                phylum,
+                kingdom
+            ])
+
+        seq2tax_rows.append([seq_id, str(tid)])
+        kept_seqs.append((seq_id, seq))
 
     if not kept_seqs:
         sys.stderr.write("No Ascomycota/Basidiomycota sequences found; check input.\n")
