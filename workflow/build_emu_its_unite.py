@@ -2,6 +2,9 @@
 import sys, argparse
 from pathlib import Path
 
+def nan(x):
+    return x if x else "NaN"
+
 def parse_args():
     ap = argparse.ArgumentParser(
         description="Build Emu ITS DB (Asco+Basidio) from UNITE sh_general_release_dynamic FASTA."
@@ -114,16 +117,17 @@ def main():
             tid = tax_id_counter
             tax_id_counter += 1
             taxon2id[tax_key] = tid
-            tax_rows.append([
+            tax_rows.append([                                           
                 str(tid),
-                species,
-                genus,
-                family,
-                order,
-                clazz,
-                phylum,
-                kingdom
-            ])
+                nan(species),
+                nan(genus),
+                nan(family),
+                nan(order),
+                nan(clazz),
+                nan(phylum),
+                nan(kingdom)
+                ])
+
 
         seq2tax_rows.append([seq_id, str(tid)])
         kept_seqs.append((seq_id, seq))
