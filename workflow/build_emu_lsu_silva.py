@@ -3,6 +3,9 @@ import argparse, sys
 from pathlib import Path
 import gzip
 
+def nan(x):
+    return x if x else "NaN"
+
 def open_maybe_gz(path: Path):
     if str(path).endswith(".gz"):
         return gzip.open(path, "rt")
@@ -127,16 +130,17 @@ def main():
                             tid = tax_id_counter
                             tax_id_counter += 1
                             taxon2id[tax_key] = tid
-                            tax_rows.append([
+                            tax_rows.append([                                      
                                 str(tid),
-                                species,
-                                genus,
-                                family,
-                                order,
-                                clazz,
-                                phylum,
-                                kingdom
-                            ])
+                                nan(species),
+                                nan(genus),
+                                nan(family),
+                                nan(order),
+                                nan(clazz),
+                                nan(phylum),
+                                nan(kingdom)
+                                ])
+
 
                         seq2tax_rows.append([seq_id, str(tid)])
 
