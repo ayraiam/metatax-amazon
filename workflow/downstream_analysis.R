@@ -5,6 +5,7 @@
 # 2) Make environment-grouped stacked bars (Family & Genus)
 # 3) Alpha diversity (Shannon / Simpson)
 # 4) Beta diversity (Bray–Curtis PCoA, Genus)
+# 5) Beta-diversity stats: PERMANOVA + betadisper           
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -498,5 +499,40 @@ p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
   theme_base
 ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
        p_pcoa, width = 5, height = 4, dpi = 300)
+
+# ==========================================================
+# 4) BETA STATS – PERMANOVA + betadisper                    
+# ==========================================================
+set.seed(2025)                                               
+meta$environment <- factor(meta$environment)                 
+
+# PERMANOVA                                                 
+perm <- vegan::adonis2(bray ~ environment,                   
+                       data = meta,                          
+                       permutations = 999)                   
+perm_df <- as.data.frame(perm)                               
+data.table::fwrite(                                          
+  as.data.table(perm_df, keep.rownames = "term"),            
+  file = file.path(outdir, paste0(prefix, "_beta_permanova.tsv")),   
+  sep  = "\t"                                                
+)                                                            
+
+# betadisper (homogeneity of dispersion)                     
+bd <- vegan::betadisper(bray, meta$environment)              
+
+bd_anova   <- as.data.frame(anova(bd))                       
+bd_perm    <- vegan::permutest(bd, permutations = 999)       
+bd_perm_df <- as.data.frame(bd_perm$tab)                     
+
+data.table::fwrite(                                          
+  as.data.table(bd_anova, keep.rownames = "term"),           
+  file = file.path(outdir, paste0(prefix, "_beta_betadisper_anova.tsv")), 
+  sep  = "\t"                                                
+)                                                            
+data.table::fwrite(                                          
+  as.data.table(bd_perm_df, keep.rownames = "term"),         
+  file = file.path(outdir, paste0(prefix, "_beta_betadisper_permutest.tsv")),  
+  sep  = "\t"                                                
+)                                                            
 
 message(">>> Done. Outputs in: ", outdir)
