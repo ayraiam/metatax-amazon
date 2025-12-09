@@ -190,17 +190,8 @@ ensure_emu16s_db() {
 }
 
 # ----------------------------------------------------------
-# Optional DB presence checks + marker flags
+# marker flags
 # ----------------------------------------------------------
-check_optional_db() {
-  local d="$1" ; local label="$2"
-  if [ -n "${d}" ] && [ -s "${d}/species_taxid.fasta" ] && [ -s "${d}/taxonomy.tsv" ]; then
-    log "${label} DB OK at: ${d}"
-    return 0
-  fi
-  warn "No usable ${label} DB at '${d:-<empty>}' — ${label} classification will be skipped."
-  return 1
-}
 
 set_marker_flags() {
   # Respect user ENABLE_* flags, but turn off markers whose DB is missing
@@ -483,13 +474,6 @@ if [[ "$ENABLE_16S" -eq 1 ]]; then
 fi
 time_function export_emu_env
 
-# Optional DB presence checks (ITS/LSU) ----------------------------------
-if [[ "${ENABLE_ITS:-0}" -eq 1 ]]; then
-  time_function 'check_optional_db "'"$EMU_DB_ITS_DIR"'" "ITS"' || true
-fi
-if [[ "${ENABLE_LSU:-0}" -eq 1 ]]; then
-  time_function 'check_optional_db "'"$EMU_DB_LSU_DIR"'" "LSU"' || true
-fi
 time_function set_marker_flags
 
 # Input discovery ---------------------------------------------------------
