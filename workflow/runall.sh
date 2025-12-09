@@ -20,6 +20,7 @@ RUN_EMU=1
 RUN_LIBSQC=1
 RUN_DOWNSTREAM=1
 BUILD_MARKER_DBS=1
+ONLY_BUILD_MARKER_DBS=0
 
 EMU_PARTITION=""
 EMU_TIME=""
@@ -55,6 +56,7 @@ usage() {
   echo "  --no-emu              Skip Emu"
   echo "  --no-downstream       Skip downstream analysis"
   echo "  --no-build-marker-dbs Do not attempt to build ITS/LSU marker databases"
+  echo "  --only-build-marker-dbs  Build ITS/LSU DBs ONLY (no QC, no Emu, no downstream)"
   echo
   echo "Emu options:"
   echo "  --emu-partition STR   Emu partition (default: inherit libsQC)"
@@ -92,6 +94,13 @@ while [[ $# -gt 0 ]]; do
     --no-qc|--skip-libsQC) RUN_LIBSQC=0; shift 1 ;;
     --no-downstream) RUN_DOWNSTREAM=0; shift 1 ;;
     --no-build-marker-dbs) BUILD_MARKER_DBS=0; shift 1 ;;
+    --only-build-marker-dbs)
+      RUN_LIBSQC=0
+      RUN_EMU=0
+      RUN_DOWNSTREAM=0
+      BUILD_MARKER_DBS=1
+      ONLY_BUILD_MARKER_DBS=1
+      shift 1 ;;
     --emu-partition) EMU_PARTITION="$2"; shift 2 ;;
     --emu-time) EMU_TIME="$2"; shift 2 ;;
     --emu-cpus) EMU_CPUS="$2"; shift 2 ;;
@@ -186,7 +195,7 @@ else
 fi
 
 ### ITS/LSU DB build step (UNITE ITS + SILVA LSU) --------------------
-if [[ "$RUN_EMU" -eq 1 && "$BUILD_MARKER_DBS" -eq 1 ]]; then
+if [[ "$BUILD_MARKER_DBS" -eq 1 ]]; then
   echo ">>> Ensuring ITS/LSU Emu databases (UNITE ITS + SILVA LSU)..."
   srun \
     --partition="$PARTITION" \
@@ -199,7 +208,7 @@ if [[ "$RUN_EMU" -eq 1 && "$BUILD_MARKER_DBS" -eq 1 ]]; then
     --export=ALL,ENV_NAME="emu-env",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",ITS_FASTA="${ITS_FASTA:-}",LSU_FASTA="${LSU_FASTA:-}" \
     /bin/bash workflow/run_build_ITS_LSU_dbs.sh
 else
-  echo ">>> Skipping ITS/LSU DB build (either --no-emu or --no-build-marker-dbs)"
+  echo ">>> Skipping ITS/LSU DB build (--no-build-marker-dbs)"
 fi
 ### ----------------------------------------------------------------------
 
@@ -210,6 +219,22 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
   export MKL_NUM_THREADS="$EMU_CPUS"
   export NUMEXPR_NUM_THREADS="$EMU_CPUS"
 
+  # Build export list for Emu step (avoid clobbering DB defaults; pass marker flags if set)
+  EMU_EXPORT="ALL,THREADS=$EMU_CPUS,FASTQ_DIR_DEFAULT=${FASTQ_DIR_DEFAULT:-results/filtered},LIMIT_FASTQS=${LIMIT_FASTQS:-1}"
+
+  # Only pass custom DB paths if the user explicitly set them
+  if [[ -n "$EMU_DB_ITS_DIR" ]]; then
+    EMU_EXPORT+=",EMU_DB_ITS_DIR=$EMU_DB_ITS_DIR"
+  fi
+  if [[ -n "$EMU_DB_LSU_DIR" ]]; then
+    EMU_EXPORT+=",EMU_DB_LSU_DIR=$EMU_DB_LSU_DIR"
+  fi
+
+  # Pass marker-selection flags if they exist in the environment
+  if [[ -n "${ENABLE_16S:-}" ]]; then EMU_EXPORT+=",ENABLE_16S=$ENABLE_16S"; fi
+  if [[ -n "${ENABLE_ITS:-}" ]]; then EMU_EXPORT+=",ENABLE_ITS=$ENABLE_ITS"; fi
+  if [[ -n "${ENABLE_LSU:-}" ]]; then EMU_EXPORT+=",ENABLE_LSU=$ENABLE_LSU"; fi
+
   srun \
     --partition="$EMU_PARTITION" \
     --nodes=1 \
@@ -218,7 +243,7 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
     --mem="$EMU_MEM" \
     --time="$EMU_TIME" \
     --chdir="$WDIR" \
-    --export=ALL,THREADS="$EMU_CPUS",EMU_DB_ITS_DIR="$EMU_DB_ITS_DIR",EMU_DB_LSU_DIR="$EMU_DB_LSU_DIR",FASTQ_DIR_DEFAULT="${FASTQ_DIR_DEFAULT:-results/filtered}",LIMIT_FASTQS="${LIMIT_FASTQS:-1}" \
+    --export="$EMU_EXPORT"
     /bin/bash workflow/run_emu_amplicons.sh \
     1>"$EMU_OUT_LOG" \
     2>"$EMU_ERR_LOG"
