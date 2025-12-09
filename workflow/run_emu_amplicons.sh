@@ -484,8 +484,12 @@ fi
 time_function export_emu_env
 
 # Optional DB presence checks (ITS/LSU) ----------------------------------
-time_function 'check_optional_db "'"$EMU_DB_ITS_DIR"'" "ITS"' || true
-time_function 'check_optional_db "'"$EMU_DB_LSU_DIR"'" "LSU"' || true
+if [[ "${ENABLE_ITS:-0}" -eq 1 ]]; then
+  time_function 'check_optional_db "'"$EMU_DB_ITS_DIR"'" "ITS"' || true
+fi
+if [[ "${ENABLE_LSU:-0}" -eq 1 ]]; then
+  time_function 'check_optional_db "'"$EMU_DB_LSU_DIR"'" "LSU"' || true
+fi
 time_function set_marker_flags
 
 # Input discovery ---------------------------------------------------------
@@ -503,7 +507,7 @@ for marker in 16S ITS LSU; do
       ;;
     ITS)
       [[ "$ENABLE_ITS" -eq 1 ]] || continue
-      CURRENT_MARKER="ITS"                                                 
+      CURRENT_MARKER="ITS"
       CURRENT_DB_DIR="$EMU_DB_ITS_DIR"
       ;;
     LSU)
