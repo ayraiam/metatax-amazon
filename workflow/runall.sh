@@ -219,8 +219,8 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
   export MKL_NUM_THREADS="$EMU_CPUS"
   export NUMEXPR_NUM_THREADS="$EMU_CPUS"
 
-  # Build export list for Emu step (avoid clobbering DB defaults; pass marker flags if set)
-  EMU_EXPORT="ALL,THREADS=$EMU_CPUS,FASTQ_DIR_DEFAULT=${FASTQ_DIR_DEFAULT:-results/filtered},LIMIT_FASTQS=${LIMIT_FASTQS:-1}"
+  # Build export list for Emu step (avoid clobbering DB defaults; pass marker flags if set)  ### NEW
+  EMU_EXPORT="ALL,THREADS=$EMU_CPUS,FASTQ_DIR_DEFAULT=${FASTQ_DIR_DEFAULT:-results/filtered},LIMIT_FASTQS=${LIMIT_FASTQS:-1}"  ### NEW
 
   # Only pass custom DB paths if the user explicitly set them
   if [[ -n "$EMU_DB_ITS_DIR" ]]; then
@@ -231,7 +231,7 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
   fi
 
   # Pass marker-selection flags if they exist in the environment
-  if [[ -n "${ENABLE_16S:-}" ]]; then EMU_EXPORT+=",ENABLE_16S=$ENABLE_16S"; fi
+  if [[ -n "${ENABLE_16S:-}" ]]; then EMU_EXPORT+=",ENABLE_16S=$ENABLE_16S"; fi                 
   if [[ -n "${ENABLE_ITS:-}" ]]; then EMU_EXPORT+=",ENABLE_ITS=$ENABLE_ITS"; fi
   if [[ -n "${ENABLE_LSU:-}" ]]; then EMU_EXPORT+=",ENABLE_LSU=$ENABLE_LSU"; fi
 
@@ -243,7 +243,7 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
     --mem="$EMU_MEM" \
     --time="$EMU_TIME" \
     --chdir="$WDIR" \
-    --export="$EMU_EXPORT"
+    --export="$EMU_EXPORT" \
     /bin/bash workflow/run_emu_amplicons.sh \
     1>"$EMU_OUT_LOG" \
     2>"$EMU_ERR_LOG"
