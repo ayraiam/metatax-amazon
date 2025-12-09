@@ -51,11 +51,19 @@ if (!file.exists(infile)) {
     recursive  = TRUE,
     full.names = TRUE
   )
-  # 2) keep only those inside a tables_b* directory
-  batch_files <- all_abund[grepl("/tables_b", all_abund)]
+  
+  tables_dir_name <- basename(dirname(infile))                                   
+  pattern_tables  <- paste0("/", tables_dir_name, "_b")  # "/tables_b", "/tables_ITS_b", ... 
+  message(">>> Using batch pattern filter: ", pattern_tables)                    
+  
+  # 3) Keep only abundance tables inside the matching tables_*_b* directories   
+  batch_files <- all_abund[grepl(pattern_tables, all_abund)]                     
   
   if (length(batch_files) == 0L) {
-    stop("Could not find infile or any batch results/tables_b*/abundance_combined.tsv")
+    stop(
+      "Could not find infile or any batch ", tables_dir_name,
+      "_b*/abundance_combined.tsv under: ", results_dir
+    )                                                                            
   }
   
   message(">>> Found ", length(batch_files), " batch abundance tables. Merging...")
@@ -290,7 +298,7 @@ mat_rel <- mx_rel$mat
 meta    <- mx_rel$meta
 
 # Normalize rows to relative abundance (safe even if already proportions)
-row_sums <- rowSums(mat_rel, na.rm = TRUE); row_sums[row_sums == 0] <- 1
+row_sums <- rowSums(mat_rel, na.rm = TRUE, ); row_sums[row_sums == 0] <- 1
 rel <- sweep(mat_rel, 1, row_sums, "/")
 
 # Metrics
