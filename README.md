@@ -51,7 +51,7 @@ DEPENDENCIES
 <pre>
 USAGE
 -----
-After cloning the repository and running "bash bootstrap.sh", you can execute
+After cloning the repository and running `bash bootstrap.sh`, you can execute
 the pipeline via the main launcher:
 
   bash workflow/runall.sh [options]
@@ -78,18 +78,25 @@ MAIN OPTIONS
                           (no QC, no Emu, no downstream)
 
 
-MARKER SELECTION (NEW)
------------------------
-The pipeline can now run **any combination** of 16S / ITS / LSU:
+MARKER SELECTION (ENV VARS)
+---------------------------
+The pipeline can run **any combination** of 16S / ITS / LSU via
+environment variables that are passed through to `run_emu_amplicons.sh`:
 
-  --enable-16s [0|1]    Enable or disable 16S analysis   (default: 1)
-  --enable-its [0|1]    Enable or disable ITS analysis   (default: auto: 1 if ITS DB exists)
-  --enable-lsu [0|1]    Enable or disable LSU analysis   (default: auto: 1 if LSU DB exists)
+  ENABLE_16S=0|1    Enable / disable 16S analysis   (default: 1)
+  ENABLE_ITS=0|1    Enable / disable ITS analysis   (default: 0, but auto-enabled if ITS DB exists and you set it to 1)
+  ENABLE_LSU=0|1    Enable / disable LSU analysis   (default: 0, but auto-enabled if LSU DB exists and you set it to 1)
 
 Examples:
-  --enable-16s 0 --enable-its 1 --enable-lsu 1     ⟶ ITS + LSU only
-  --enable-16s 1 --enable-its 0 --enable-lsu 0     ⟶ 16S only
-  --enable-16s 1 --enable-its 1 --enable-lsu 1     ⟶ run all markers
+
+  # ITS + LSU only
+  ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=1 bash workflow/runall.sh ...
+
+  # 16S only
+  ENABLE_16S=1 ENABLE_ITS=0 ENABLE_LSU=0 bash workflow/runall.sh ...
+
+  # All markers (assuming ITS / LSU DBs exist)
+  ENABLE_16S=1 ENABLE_ITS=1 ENABLE_LSU=1 bash workflow/runall.sh ...
 
 
 EMU OPTIONS
@@ -102,14 +109,14 @@ EMU OPTIONS
   --emu-db-its PATH     Path to ITS Emu DB directory
   --emu-db-lsu PATH     Path to LSU Emu DB directory
 
-If ITS/LSU DBs are not provided or missing, their respective markers are skipped.
+If ITS/LSU DBs are not provided or are missing, those markers are skipped.
 The 16S Emu database (bacteria + archaea) is auto-downloaded at first use.
 
 
 EXAMPLES
 ---------
 
-# 1) Run ALL stages (QC → Emu → Downstream) for ALL markers
+# 1) Run ALL stages (QC → Emu → Downstream) for 16S only (default)
 bash workflow/runall.sh
 
 
@@ -125,11 +132,11 @@ bash workflow/runall.sh --only-build-marker-dbs
 bash workflow/runall.sh --no-emu --no-downstream
 
 
-# 5) Run ONLY Emu (QC already done)
+# 5) Run ONLY Emu (QC already done) on 16S
 bash workflow/runall.sh --no-qc --no-downstream
 
 
-# 6) Run Emu on ALL FASTQs (disable 3-file test limit)
+# 6) Run Emu on ALL FASTQs (disable 3-file test limit) for 16S
 LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --no-downstream
 
 
@@ -154,24 +161,32 @@ FASTQ_DIR_DEFAULT=/path/to/filtered \
 bash workflow/runall.sh --no-qc --no-downstream
 
 
-# 11) Run ONLY ITS + LSU (skip 16S)
-bash workflow/runall.sh \
-  --enable-16s 0 \
-  --enable-its 1 \
-  --enable-lsu 1
+# 11) Run ONLY ITS + LSU (skip 16S) on ALL FASTQs
+ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=1 \
+bash workflow/runall.sh --no-qc --no-downstream
 
 
-# 12) Run ONLY 16S
-bash workflow/runall.sh \
-  --enable-16s 1 \
-  --enable-its 0 \
-  --enable-lsu 0
+# 12) Run ONLY 16S (explicit)
+ENABLE_16S=1 ENABLE_ITS=0 ENABLE_LSU=0 \
+bash workflow/runall.sh --no-qc --no-downstream
 
 
-# 13) Run Emu in batches (recommended for large datasets)
-LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream --offset-fastqs 0
-LIMIT_FASTQS=25 bash workflow/runall.sh --no-qc --no-downstream --offset-fastqs 25
-LIMIT_FASTQS=26 bash workflow/runall.sh --no-qc --no-downstream --offset-fastqs 50
+# 13) Run ITS ONLY in batches (recommended for large datasets)
+#     Example: first 25 FASTQs (0–24)
+ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=0 \
+BATCH_TAG=bITS_b000_n025 \
+LIMIT_FASTQS=25 OFFSET_FASTQS=0 \
+FASTQ_DIR_DEFAULT=results/filtered \
+bash workflow/runall.sh --no-qc --no-downstream \
+  --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
+
+#     Next 25 FASTQs (25–49)
+ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=0 \
+BATCH_TAG=bITS_b025_n025 \
+LIMIT_FASTQS=25 OFFSET_FASTQS=25 \
+FASTQ_DIR_DEFAULT=results/filtered \
+bash workflow/runall.sh --no-qc --no-downstream \
+  --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
 
 # 14) Run ONLY the downstream analysis
@@ -181,6 +196,7 @@ bash workflow/runall.sh --no-qc --no-emu \
 
 # 15) Run QC + Emu but skip downstream analysis
 bash workflow/runall.sh --no-downstream
+
 </pre>
 
 <pre>
