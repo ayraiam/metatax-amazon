@@ -6,7 +6,7 @@
 # 3) Alpha diversity (Shannon / Simpson)
 # 4) Beta diversity (Bray–Curtis PCoA, Genus)
 # 5) Beta-diversity stats: PERMANOVA + betadisper
-# 6) NEW: Per-code genus CLR concordance scatter plots (Peneira vs Floresta)
+# 6) Per-code genus CLR concordance scatter plots (Peneira vs Floresta)
 # ==========================================================
 
 suppressPackageStartupMessages({
