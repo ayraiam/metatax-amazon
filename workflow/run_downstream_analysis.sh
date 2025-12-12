@@ -70,6 +70,8 @@ run_downstream() {
   log "  infile  = $INFILE"
   log "  outdir  = $OUTDIR"
   log "  basename= $BASENAME"
+  log "  MODE    = ${MODE:-16S}"
+  log "  USE_COUNTS = ${USE_COUNTS:-1}"
 
   Rscript workflow/downstream_analysis.R \
     "$INFILE" \
