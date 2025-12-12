@@ -77,7 +77,18 @@ MAIN OPTIONS
   --only-build-marker-dbs Build ITS/LSU databases **only**
                           (no QC, no Emu, no downstream)
 
+  ### Downstream mode and numeric source
+  --mode STR            Downstream marker mode: 16S or ITS (default: 16S)
+                        Selects the default downstream input file:
+                          16S -> results/tables/abundance_combined.tsv
+                          ITS -> results/tables_ITS/abundance_combined.tsv
 
+  --use-counts INT      Numeric column used for downstream genus-level analysis:
+                          1 = estimated_counts (default, recommended)
+                          0 = abundance
+</pre>
+
+<pre>
 MARKER SELECTION (ENV VARS)
 ---------------------------
 The pipeline can run **any combination** of 16S / ITS / LSU via
@@ -86,6 +97,10 @@ environment variables that are passed through to `run_emu_amplicons.sh`:
   ENABLE_16S=0|1    Enable / disable 16S analysis   (default: 1)
   ENABLE_ITS=0|1    Enable / disable ITS analysis   (default: 0, but auto-enabled if ITS DB exists and you set it to 1)
   ENABLE_LSU=0|1    Enable / disable LSU analysis   (default: 0, but auto-enabled if LSU DB exists and you set it to 1)
+
+### NOTE
+These variables control the **Emu stage only**.
+The downstream analysis is selected independently using `--mode 16S|ITS`.
 
 Examples:
 
@@ -97,8 +112,9 @@ Examples:
 
   # All markers (assuming ITS / LSU DBs exist)
   ENABLE_16S=1 ENABLE_ITS=1 ENABLE_LSU=1 bash workflow/runall.sh ...
+</pre>
 
-
+<pre>
 EMU OPTIONS
 ------------
   --emu-partition STR   Partition for Emu (default: inherit libsQC)
@@ -111,13 +127,14 @@ EMU OPTIONS
 
 If ITS/LSU DBs are not provided or are missing, those markers are skipped.
 The 16S Emu database (bacteria + archaea) is auto-downloaded at first use.
+</pre>
 
-
+<pre>
 EXAMPLES
 ---------
 
 # 1) Run ALL stages (QC → Emu → Downstream) for 16S only (default)
-bash workflow/runall.sh
+bash workflow/runall.sh --mode 16S
 
 
 # 2) Run ALL stages with custom resources
@@ -189,26 +206,27 @@ bash workflow/runall.sh --no-qc --no-downstream \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
 
-# 14) Run ONLY the downstream analysis
-bash workflow/runall.sh --no-qc --no-emu \
-  --downstream-infile results/tables/abundance_combined.tsv
+# 14) Run ONLY the downstream analysis (16S)
+bash workflow/runall.sh --no-qc --no-emu --mode 16S
+
+#     Run ONLY the downstream analysis (ITS)
+bash workflow/runall.sh --no-qc --no-emu --mode ITS
 
 
 # 15) Run QC + Emu but skip downstream analysis
 bash workflow/runall.sh --no-downstream
-
 </pre>
 
 <pre>
 OUTPUTS
 -------
- logs/                    - timestamped job logs
- results/filtered/        - post-filtered FASTQs
- results/emu_runs_bXXX/   - per-marker Emu output (16S / ITS / LSU separated)
- results/tables_bXXX/     - merged abundance & mapping tables
- results/plots_bXXX/      - genus-level stacked barplots
- metadata/                - FASTQ manifest, JSON dicts, primer lists
-
+ logs/                             - timestamped job logs
+ results/filtered/                 - post-filtered FASTQs
+ results/emu_runs_bXXX/            - per-marker Emu output (16S / ITS / LSU separated)
+ results/tables_bXXX/              - merged abundance & mapping tables
+ results/plots_bXXX/               - genus-level stacked barplots
+ results/plots/*_code_concordance*/- per-code genus CLR concordance scatter plots   ### NEW
+ metadata/                         - FASTQ manifest, JSON dicts, primer lists
 </pre>
 
 <pre>
@@ -230,10 +248,6 @@ CONTACT
 -------
 ayrabioinf@gmail.com
 https://www.linkedin.com/company/ayraiam
-</pre>
-
-email: ayrabioinf@gmail.com
-linkedin: https://www.linkedin.com/company/ayraiam
 </pre>
 
 <p align="center"><sub>© 2025 AY:RΔ — data and discovery in flow</sub></p>
