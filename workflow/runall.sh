@@ -34,7 +34,15 @@ DOWNSTREAM_TIME=""
 DOWNSTREAM_CPUS=""
 DOWNSTREAM_MEM=""
 DOWNSTREAM_ENV_NAME="emu-downstream"
-DOWNSTREAM_INFILE="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/tables/abundance_combined.tsv"
+
+### downstream input file becomes MODE-dependent (16S vs ITS)
+MODE="16S"          ### 16S or ITS
+USE_COUNTS="1"      ### 1=estimated_counts, 0=abundance (used for CLR + genus profiles)
+
+DOWNSTREAM_INFILE_16S="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/tables/abundance_combined.tsv"
+DOWNSTREAM_INFILE_ITS="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/tables_ITS/abundance_combined.tsv"
+DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_16S"
+
 DOWNSTREAM_OUTDIR="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/plots"
 DOWNSTREAM_BASENAME="downstream"
 
@@ -71,10 +79,14 @@ usage() {
   echo "  --downstream-time HH:MM:SS  Walltime (default: inherit libsQC)"
   echo "  --downstream-cpus INT       CPUs (default: inherit libsQC)"
   echo "  --downstream-mem STR        Memory (default: inherit libsQC)"
-  echo "  --downstream-infile PATH    Input abundance table"
+  echo "  --downstream-infile PATH    Input abundance table (optional override)"
   echo "  --downstream-outdir PATH    Output plots directory"
   echo "  --downstream-env STR        Conda env name (default: emu-downstream)"
   echo "  --downstream-basename STR   Basename prefix for outputs"
+  echo
+  echo "Mode options (kingdom runs separately by directory):"
+  echo "  --mode STR             16S or ITS (default: 16S)"
+  echo "  --use-counts INT       1=estimated_counts, 0=abundance (default: 1)"
   echo
   echo "  -h, --help            Show this help message"
   exit 0
@@ -111,10 +123,12 @@ while [[ $# -gt 0 ]]; do
     --downstream-time) DOWNSTREAM_TIME="$2"; shift 2 ;;
     --downstream-cpus) DOWNSTREAM_CPUS="$2"; shift 2 ;;
     --downstream-mem) DOWNSTREAM_MEM="$2"; shift 2 ;;
-    --downstream-infile) DOWNSTREAM_INFILE="$2"; shift 2 ;;
+    --downstream-infile) DOWNSTREAM_INFILE="$2"; shift 2 ;;  # user override still allowed
     --downstream-outdir) DOWNSTREAM_OUTDIR="$2"; shift 2 ;;
     --downstream-env) DOWNSTREAM_ENV_NAME="$2"; shift 2 ;;
     --downstream-basename) DOWNSTREAM_BASENAME="$2"; shift 2 ;;
+    --mode) MODE="$2"; shift 2 ;;
+    --use-counts) USE_COUNTS="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "Unknown argument: $1"; usage ;;
   esac
@@ -129,6 +143,16 @@ DOWNSTREAM_PARTITION="${DOWNSTREAM_PARTITION:-$PARTITION}"
 DOWNSTREAM_TIME="${DOWNSTREAM_TIME:-$TIME}"
 DOWNSTREAM_CPUS="${DOWNSTREAM_CPUS:-$CPUS}"
 DOWNSTREAM_MEM="${DOWNSTREAM_MEM:-$MEM}"
+
+### if user did NOT override --downstream-infile explicitly,
+### switch default infile based on MODE (16S vs ITS directory)
+if [[ "${DOWNSTREAM_INFILE}" == "${DOWNSTREAM_INFILE_16S}" || "${DOWNSTREAM_INFILE}" == "${DOWNSTREAM_INFILE_ITS}" ]]; then
+  if [[ "$(echo "$MODE" | tr '[:lower:]' '[:upper:]')" == "ITS" ]]; then
+    DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_ITS"
+  else
+    DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_16S"
+  fi
+fi
 
 mkdir -p logs metadata
 
@@ -168,6 +192,10 @@ echo "Time      : $TIME"
 echo "CPUs      : $CPUS"
 echo "Memory    : $MEM"
 echo "Work dir  : $WDIR"
+### NEW
+echo "MODE      : $MODE"
+echo "USE_COUNTS: $USE_COUNTS"
+echo "DOWN_IN   : $DOWNSTREAM_INFILE"
 echo "============================================"
 echo
 
@@ -219,8 +247,8 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
   export MKL_NUM_THREADS="$EMU_CPUS"
   export NUMEXPR_NUM_THREADS="$EMU_CPUS"
 
-  # Build export list for Emu step (avoid clobbering DB defaults; pass marker flags if set)  ### NEW
-  EMU_EXPORT="ALL,THREADS=$EMU_CPUS,FASTQ_DIR_DEFAULT=${FASTQ_DIR_DEFAULT:-results/filtered},LIMIT_FASTQS=${LIMIT_FASTQS:-1}"  ### NEW
+  # Build export list for Emu step (avoid clobbering DB defaults; pass marker flags if set)
+  EMU_EXPORT="ALL,THREADS=$EMU_CPUS,FASTQ_DIR_DEFAULT=${FASTQ_DIR_DEFAULT:-results/filtered},LIMIT_FASTQS=${LIMIT_FASTQS:-1}"
 
   # Only pass custom DB paths if the user explicitly set them
   if [[ -n "$EMU_DB_ITS_DIR" ]]; then
@@ -231,7 +259,7 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
   fi
 
   # Pass marker-selection flags if they exist in the environment
-  if [[ -n "${ENABLE_16S:-}" ]]; then EMU_EXPORT+=",ENABLE_16S=$ENABLE_16S"; fi                 
+  if [[ -n "${ENABLE_16S:-}" ]]; then EMU_EXPORT+=",ENABLE_16S=$ENABLE_16S"; fi
   if [[ -n "${ENABLE_ITS:-}" ]]; then EMU_EXPORT+=",ENABLE_ITS=$ENABLE_ITS"; fi
   if [[ -n "${ENABLE_LSU:-}" ]]; then EMU_EXPORT+=",ENABLE_LSU=$ENABLE_LSU"; fi
 
@@ -262,7 +290,8 @@ if [[ "$RUN_DOWNSTREAM" -eq 1 ]]; then
     --mem="$DOWNSTREAM_MEM" \
     --time="$DOWNSTREAM_TIME" \
     --chdir="$WDIR" \
-    --export=ALL,ENV_NAME="$DOWNSTREAM_ENV_NAME",INFILE="$DOWNSTREAM_INFILE",OUTDIR="$DOWNSTREAM_OUTDIR",BASENAME="$DOWNSTREAM_BASENAME" \
+    ### export MODE + USE_COUNTS
+    --export=ALL,ENV_NAME="$DOWNSTREAM_ENV_NAME",INFILE="$DOWNSTREAM_INFILE",OUTDIR="$DOWNSTREAM_OUTDIR",BASENAME="$DOWNSTREAM_BASENAME",MODE="$MODE",USE_COUNTS="$USE_COUNTS" \
     /bin/bash workflow/run_downstream_analysis.sh \
     1>"$DOWN_OUT_LOG" \
     2>"$DOWN_ERR_LOG"
