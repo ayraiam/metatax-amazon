@@ -290,7 +290,6 @@ if [[ "$RUN_DOWNSTREAM" -eq 1 ]]; then
     --mem="$DOWNSTREAM_MEM" \
     --time="$DOWNSTREAM_TIME" \
     --chdir="$WDIR" \
-    ### export MODE + USE_COUNTS
     --export=ALL,ENV_NAME="$DOWNSTREAM_ENV_NAME",INFILE="$DOWNSTREAM_INFILE",OUTDIR="$DOWNSTREAM_OUTDIR",BASENAME="$DOWNSTREAM_BASENAME",MODE="$MODE",USE_COUNTS="$USE_COUNTS" \
     /bin/bash workflow/run_downstream_analysis.sh \
     1>"$DOWN_OUT_LOG" \
