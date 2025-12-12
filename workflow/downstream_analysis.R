@@ -5,7 +5,8 @@
 # 2) Make environment-grouped stacked bars (Family & Genus)
 # 3) Alpha diversity (Shannon / Simpson)
 # 4) Beta diversity (Bray–Curtis PCoA, Genus)
-# 5) Beta-diversity stats: PERMANOVA + betadisper           
+# 5) Beta-diversity stats: PERMANOVA + betadisper
+# 6) NEW: Per-code genus CLR concordance scatter plots (Peneira vs Floresta)
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -29,6 +30,12 @@ outdir  <- args[2]
 prefix  <- ifelse(length(args) >= 3, args[3], "downstream")
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
+### downstream mode + numeric source (passed from runall.sh)
+MODE <- toupper(Sys.getenv("MODE", "16S"))
+USE_COUNTS <- as.integer(Sys.getenv("USE_COUNTS", "1"))
+message(">>> MODE = ", MODE)
+message(">>> USE_COUNTS = ", USE_COUNTS)
+
 # ==========================================================
 # 0) If infile does NOT exist, merge batch tables_b*/abundance_combined.tsv
 # ==========================================================
@@ -36,16 +43,12 @@ if (!file.exists(infile)) {
   message(">>> Input file not found: ", infile)
   message(">>> Trying to merge batch abundance_combined.tsv files from results/tables_b*/ ...")
   
-  # Try to infer the 'results' dir from the expected infile path:
-  # e.g. .../results/tables/abundance_combined.tsv -> .../results
   results_dir <- dirname(dirname(infile))
   if (!dir.exists(results_dir)) {
-    # fallback: use current working directory + 'results'
     results_dir <- file.path(getwd(), "results")
   }
   message(">>> Searching for batch tables under: ", results_dir)
   
-  # 1) find all abundance_combined.tsv files recursively
   all_abund <- list.files(
     path       = results_dir,
     pattern    = "^abundance_combined\\.tsv$",
@@ -53,18 +56,17 @@ if (!file.exists(infile)) {
     full.names = TRUE
   )
   
-  tables_dir_name <- basename(dirname(infile))                                   
-  pattern_tables  <- paste0("/", tables_dir_name, "_b")  # "/tables_b", "/tables_ITS_b", ... 
-  message(">>> Using batch pattern filter: ", pattern_tables)                    
+  tables_dir_name <- basename(dirname(infile))
+  pattern_tables  <- paste0("/", tables_dir_name, "_b")
+  message(">>> Using batch pattern filter: ", pattern_tables)
   
-  # 3) Keep only abundance tables inside the matching tables_*_b* directories   
-  batch_files <- all_abund[grepl(pattern_tables, all_abund)]                     
+  batch_files <- all_abund[grepl(pattern_tables, all_abund)]
   
   if (length(batch_files) == 0L) {
     stop(
       "Could not find infile or any batch ", tables_dir_name,
       "_b*/abundance_combined.tsv under: ", results_dir
-    )                                                                            
+    )
   }
   
   message(">>> Found ", length(batch_files), " batch abundance tables. Merging...")
@@ -75,7 +77,6 @@ if (!file.exists(infile)) {
   merged_dt <- data.table::rbindlist(dt_list, use.names = TRUE, fill = TRUE)
   data.table::setnames(merged_dt, tolower(names(merged_dt)))
   
-  # Ensure target directory exists (e.g. results/tables/)
   dir.create(dirname(infile), showWarnings = FALSE, recursive = TRUE)
   data.table::fwrite(merged_dt, file = infile, sep = "\t")
   message(">>> Merged table written to: ", infile)
@@ -85,11 +86,10 @@ if (!file.exists(infile)) {
 add_environment <- function(dt) {
   stopifnot("file" %in% names(dt))
   
-  # Normalize possible typos like "LO1" -> "L01" or "lO2" -> "L02"
   dt[, file_norm := toupper(file)]
   dt[, file_norm := gsub("LO([0-9])", "L0\\1", file_norm)]
   dt[, file_norm := gsub("IO([0-9])", "L0\\1", file_norm)]
-  dt[, file_norm := gsub("O([0-9])", "0\\1", file_norm)]  # generic fix
+  dt[, file_norm := gsub("O([0-9])", "0\\1", file_norm)]
   
   dt[, environment := NA_character_]
   
@@ -104,7 +104,6 @@ add_environment <- function(dt) {
     "^PENEIRA"  = "Peneira"
   )
   
-  # Match using normalized filenames
   for (pat in names(rules)) {
     dt[str_detect(file_norm, pat), environment := rules[[pat]]]
   }
@@ -113,24 +112,56 @@ add_environment <- function(dt) {
   dt
 }
 
+### extract numeric code from filename (0500 -> 500)
+add_code <- function(dt) {
+  stopifnot("file" %in% names(dt))
+  f <- toupper(dt$file)
+  
+  code_chr <- rep(NA_character_, length(f))
+  
+  # PENEIRA_0500_...
+  idx_p <- str_detect(f, "^PENEIRA_")
+  if (any(idx_p)) {
+    code_chr[idx_p] <- str_match(f[idx_p], "^PENEIRA_([0-9]+)_")[, 2]
+  }
+  
+  # L01_500_... or L02_1500_...
+  idx_l <- str_detect(f, "^L0[12]_")
+  if (any(idx_l)) {
+    code_chr[idx_l] <- str_match(f[idx_l], "^L0[12]_([0-9]+)_")[, 2]
+  }
+  
+  dt[, code := suppressWarnings(as.integer(code_chr))]
+  dt
+}
+
 # ---------- Read + cleaning ----------
 read_and_shape <- function(path){
   dt <- fread(path, sep = "\t", header = TRUE, na.strings = c("", "NA"))
   setnames(dt, tolower(names(dt)))
+  
+  ### normalize possible "estimated counts" column name
+  if ("estimated counts" %in% names(dt)) setnames(dt, "estimated counts", "estimated_counts")
+  
   if (!"file" %in% names(dt)) stop("Input must contain 'file' column")
   dt <- add_environment(dt)
+  dt <- add_code(dt)  
   
-  # numeric abundance
+  # numeric abundance + counts
   if (!"abundance" %in% names(dt)) dt[, abundance := NA_real_]
   suppressWarnings(dt[, abundance := as.numeric(abundance)])
-  if ("estimated_counts" %in% names(dt) && sum(dt$abundance, na.rm = TRUE) == 0)
-    dt[, abundance := as.numeric(estimated_counts)]
-  dt <- dt[is.finite(abundance)]
+  
+  if (!"estimated_counts" %in% names(dt)) dt[, estimated_counts := NA_real_]
+  suppressWarnings(dt[, estimated_counts := as.numeric(estimated_counts)])
+  
+  ### unify numeric column used downstream
+  dt[, value := if (USE_COUNTS == 1) estimated_counts else abundance]
+  
+  dt <- dt[is.finite(value)]
   
   if (!"genus" %in% names(dt))  dt[, genus  := NA_character_]
   if (!"family" %in% names(dt)) dt[, family := NA_character_]
   
-  # derive genus if missing
   if (all(is.na(dt$genus)) && "name" %in% names(dt))
     dt[, genus := sub("\\s.*$", "", name)]
   dt[is.na(genus) | genus == "", genus := "No genus"]
@@ -143,7 +174,8 @@ read_and_shape <- function(path){
 # ---------- Matrix builder ----------
 build_matrix <- function(dt, tax_col){
   stopifnot(tax_col %in% names(dt))
-  long <- dt[, .(file, environment, taxon = get(tax_col), value = abundance)]
+  ### use unified 'value' instead of 'abundance'
+  long <- dt[, .(file, environment, taxon = get(tax_col), value = value)]
   long[taxon == "" | is.na(taxon), taxon := paste0("No ", tax_col)]
   long <- long[, .(value = sum(value, na.rm = TRUE)), by = .(file, environment, taxon)]
   wide <- long |>
@@ -178,23 +210,21 @@ palette_with_other_first <- function(levels_vec){
   lev <- unique(levels_vec)
   ordered <- c("Other", setdiff(lev, "Other"))
   
-  # Build a long discrete palette: Set1 -> Set2 -> Set3
   get_pal <- function(name){
     maxn <- RColorBrewer::brewer.pal.info[name, "maxcolors"]
     RColorBrewer::brewer.pal(maxn, name)
   }
   pool <- c(get_pal("Set1"), get_pal("Set2"), get_pal("Set3"))
   
-  k <- max(0, length(ordered) - 1)  # non-"Other" colors needed
+  k <- max(0, length(ordered) - 1)
   cols_non_other <- if (k == 0) character(0) else rep(pool, length.out = k)
   
-  vals <- c("grey80", cols_non_other)  # "Other" first and grey
+  vals <- c("grey80", cols_non_other)
   names(vals) <- ordered
   list(levels = ordered, values = vals)
 }
 
 legend_label_wrap <- function(x) {
-  # replace one or more spaces with a line break
   vapply(x, function(s) if (is.na(s)) s else gsub("\\s+", "\n", s), character(1))
 }
 
@@ -206,19 +236,16 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
   long  <- shaped$long
   collapsed <- collapse_topN_by_env(long, N = N)
   
-  # order samples within each environment by file
   collapsed[, file_fac := factor(file, levels = unique(file)), by = environment]
   
-  # 'Other' first and legend title set to rank
   lvl_info <- palette_with_other_first(collapsed$taxon)
   collapsed[, taxon := factor(taxon, levels = lvl_info$levels)]
   
-  # Determine if facet labels should be shown (hide for Genus)
   facet_text_size <- if (tolower(title_rank) == "genus") 0 else 12
   facet_strip <- if (tolower(title_rank) == "genus") element_blank() else element_text(size = facet_text_size)
   
   p <- ggplot(collapsed, aes(x = file_fac, y = rel, fill = taxon)) +
-    geom_col(width = 0.98) +  # bars nearly touching
+    geom_col(width = 0.98) +
     facet_grid(~ environment, scales = "free_x", space = "free_x") +
     scale_y_continuous(labels = function(z) 100 * z,
                        expand = expansion(mult = c(0, 0.02))) +
@@ -281,8 +308,8 @@ p_genus <- make_env_stacks(
 
 if (!is.null(p_family) && !is.null(p_genus)) {
   combined <- plot_grid(
-    p_family,  # keep legend
-    p_genus,   # keep legend
+    p_family,
+    p_genus,
     ncol = 1, rel_heights = c(1, 1), align = "v"
   )
   ggsave(file.path(outdir, paste0(prefix, "_stacks_family_genus_grid.png")),
@@ -298,15 +325,12 @@ mx_rel  <- build_matrix(dt_raw, "genus")
 mat_rel <- mx_rel$mat
 meta    <- mx_rel$meta
 
-# Normalize rows to relative abundance (safe even if already proportions)
-row_sums <- rowSums(mat_rel, na.rm = TRUE, ); row_sums[row_sums == 0] <- 1
+row_sums <- rowSums(mat_rel, na.rm = TRUE); row_sums[row_sums == 0] <- 1
 rel <- sweep(mat_rel, 1, row_sums, "/")
 
-# Metrics
 shannon <- vegan::diversity(rel, index = "shannon")
-simpson <- vegan::diversity(rel, index = "simpson")  # 1 - D in vegan
+simpson <- vegan::diversity(rel, index = "simpson")
 
-# Save table
 alpha_df <- data.table::data.table(
   file    = rownames(mat_rel),
   Shannon = as.numeric(shannon),
@@ -314,7 +338,6 @@ alpha_df <- data.table::data.table(
 )
 alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
 
-### make environment an ordered factor (needed for bar positions)
 alpha_df[, environment := factor(
   environment,
   levels = c("Campina", "Floresta", "Igarape", "Peneira")
@@ -326,7 +349,6 @@ data.table::fwrite(
   sep  = "\t"
 )
 
-### helper to compute pairwise Wilcoxon tests
 pairwise_wilcox <- function(df, value_col, metric_name) {
   df <- df[!is.na(environment) & !is.na(get(value_col))]
   envs <- levels(df$environment)
@@ -350,7 +372,6 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
   rbindlist(res_list)
 }
 
-### convert p-value to stars
 pval_to_stars <- function(p) {
   ifelse(p < 0.001, "***",
          ifelse(p < 0.01, "**",
@@ -359,7 +380,6 @@ pval_to_stars <- function(p) {
   )
 }
 
-### build annotation dataframe (x positions, y heights, labels)
 build_sig_df <- function(sig_pw, df, value_col) {
   if (nrow(sig_pw) == 0) return(NULL)
   
@@ -380,7 +400,6 @@ build_sig_df <- function(sig_pw, df, value_col) {
   sig_pw
 }
 
-### compute ALL pairwise tests and write to TSV
 pw_shannon <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
 pw_simpson <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
 pw_all <- rbind(pw_shannon, pw_simpson)
@@ -391,14 +410,12 @@ fwrite(
   sep  = "\t"
 )
 
-### subset ONLY significant tests for plotting
 sig_shannon <- pw_shannon[!is.na(p_value) & p_value < 0.05]
 sig_simpson <- pw_simpson[!is.na(p_value) & p_value < 0.05]
 
 sig_sh_df <- build_sig_df(sig_shannon, alpha_df, "Shannon")
 sig_sp_df <- build_sig_df(sig_simpson, alpha_df, "Simpson")
 
-# Common theme + colors
 theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
 
 env_colors <- c(
@@ -418,7 +435,6 @@ p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, c
   scale_color_manual(values = env_colors) +
   theme_base
 
-### add bars + asterisks for significant Shannon comparisons
 if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
   p_sh <- p_sh +
     geom_segment(
@@ -446,7 +462,6 @@ p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, c
   scale_color_manual(values = env_colors) +
   theme_base
 
-### add bars + asterisks for significant Simpson comparisons
 if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
   p_sp <- p_sp +
     geom_segment(
@@ -471,7 +486,7 @@ bray <- vegan::vegdist(rel, method = "bray")
 
 pcoa <- cmdscale(bray, k = 2, eig = TRUE)
 eig  <- pcoa$eig
-eig[eig < 0] <- 0  # guard against tiny negative numerical eigenvalues
+eig[eig < 0] <- 0
 var_expl <- eig / sum(eig)
 pc1_lab <- sprintf("PC1 (%.1f%%)", 100 * var_expl[1])
 pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_expl[2])
@@ -494,45 +509,119 @@ p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
   labs(
     x = pc1_lab,
     y = pc2_lab,
-    title = ""  # Bray–Curtis PCoA (Genus)
+    title = ""
   ) +
   theme_base
 ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
        p_pcoa, width = 5, height = 4, dpi = 300)
 
 # ==========================================================
-# 4) BETA STATS – PERMANOVA + betadisper                    
+# 4) BETA STATS – PERMANOVA + betadisper
 # ==========================================================
-set.seed(2025)                                               
-meta$environment <- factor(meta$environment)                 
+set.seed(2025)
+meta$environment <- factor(meta$environment)
 
-# PERMANOVA                                                 
-perm <- vegan::adonis2(bray ~ environment,                   
-                       data = meta,                          
-                       permutations = 999)                   
-perm_df <- as.data.frame(perm)                               
-data.table::fwrite(                                          
-  as.data.table(perm_df, keep.rownames = "term"),            
-  file = file.path(outdir, paste0(prefix, "_beta_permanova.tsv")),   
-  sep  = "\t"                                                
-)                                                            
+perm <- vegan::adonis2(bray ~ environment,
+                       data = meta,
+                       permutations = 999)
+perm_df <- as.data.frame(perm)
+data.table::fwrite(
+  as.data.table(perm_df, keep.rownames = "term"),
+  file = file.path(outdir, paste0(prefix, "_beta_permanova.tsv")),
+  sep  = "\t"
+)
 
-# betadisper (homogeneity of dispersion)                     
-bd <- vegan::betadisper(bray, meta$environment)              
+bd <- vegan::betadisper(bray, meta$environment)
 
-bd_anova   <- as.data.frame(anova(bd))                       
-bd_perm    <- vegan::permutest(bd, permutations = 999)       
-bd_perm_df <- as.data.frame(bd_perm$tab)                     
+bd_anova   <- as.data.frame(anova(bd))
+bd_perm    <- vegan::permutest(bd, permutations = 999)
+bd_perm_df <- as.data.frame(bd_perm$tab)
 
-data.table::fwrite(                                          
-  as.data.table(bd_anova, keep.rownames = "term"),           
-  file = file.path(outdir, paste0(prefix, "_beta_betadisper_anova.tsv")), 
-  sep  = "\t"                                                
-)                                                            
-data.table::fwrite(                                          
-  as.data.table(bd_perm_df, keep.rownames = "term"),         
-  file = file.path(outdir, paste0(prefix, "_beta_betadisper_permutest.tsv")),  
-  sep  = "\t"                                                
-)                                                            
+data.table::fwrite(
+  as.data.table(bd_anova, keep.rownames = "term"),
+  file = file.path(outdir, paste0(prefix, "_beta_betadisper_anova.tsv")),
+  sep  = "\t"
+)
+data.table::fwrite(
+  as.data.table(bd_perm_df, keep.rownames = "term"),
+  file = file.path(outdir, paste0(prefix, "_beta_betadisper_permutest.tsv")),
+  sep  = "\t"
+)
+
+# ==========================================================
+# 5) PER-CODE GENUS CLR CONCORDANCE (Peneira vs Floresta)
+#     - One scatter plot per code
+#     - x = CLR(Floresta), y = CLR(Peneira)
+#     - dots = genera
+# ==========================================================
+dt_pf <- dt_raw[environment %in% c("Peneira", "Floresta") & !is.na(code)]
+
+target_codes <- c(500, 1500, 2500, 3500, 4500)
+dt_pf <- dt_pf[code %in% target_codes]
+
+mx_g <- build_matrix(dt_pf, "genus")
+mat_g <- mx_g$mat
+meta_g <- as.data.table(mx_g$meta)
+
+# attach code to meta (file -> code)
+meta_g <- merge(meta_g, unique(dt_pf[, .(file, code)]), by = "file", all.x = TRUE)
+
+# CLR: relative -> +pseudocount -> log -> center
+row_sums_g <- rowSums(mat_g, na.rm = TRUE); row_sums_g[row_sums_g == 0] <- 1
+rel_g <- sweep(mat_g, 1, row_sums_g, "/")
+pseudocount <- 1e-6
+rel_g <- rel_g + pseudocount
+log_g <- log(rel_g)
+clr_g <- sweep(log_g, 1, rowMeans(log_g), "-")
+
+corr_dir <- file.path(outdir, paste0(prefix, "_code_concordance_", MODE))
+dir.create(corr_dir, showWarnings = FALSE, recursive = TRUE)
+
+for (cc in target_codes) {
+  files_p <- meta_g[environment == "Peneira" & code == cc, file]
+  files_f <- meta_g[environment == "Floresta" & code == cc, file]
+  
+  if (length(files_p) == 0 || length(files_f) == 0) next
+  
+  vP <- colMeans(clr_g[files_p, , drop = FALSE], na.rm = TRUE)
+  vF <- colMeans(clr_g[files_f, , drop = FALSE], na.rm = TRUE)
+  
+  df <- data.table(
+    genus = names(vP),
+    CLR_Floresta = as.numeric(vF[names(vP)]),
+    CLR_Peneira  = as.numeric(vP)
+  )
+  df <- df[is.finite(CLR_Floresta) & is.finite(CLR_Peneira)]
+  
+  ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
+  r <- unname(ct$estimate)
+  r2 <- r^2
+  pval <- ct$p.value
+  
+  df[, resid_abs := abs(CLR_Peneira - CLR_Floresta)]
+  top_lab <- df[order(-resid_abs)][1:min(5, .N)]
+  
+  p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
+    geom_point(alpha = 0.75, size = 1.7) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.6, linetype = "dashed") +
+    geom_text(data = top_lab, aes(label = genus), size = 3, vjust = -0.6) +
+    labs(
+      title = paste0("Code ", cc, " (", MODE, ")"),
+      subtitle = sprintf("Pearson R² = %.2f, p = %.2g", r2, pval),
+      x = "CLR abundance (Floresta)",
+      y = "CLR abundance (Peneira)"
+    ) +
+    theme_classic(base_size = 12)
+  
+  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.png")),
+         p, width = 5.2, height = 4.2, dpi = 300)
+  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.pdf")),
+         p, width = 5.2, height = 4.2)
+  
+  fwrite(df[, .(genus, CLR_Floresta, CLR_Peneira)],
+         file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_clr.tsv")),
+         sep = "\t")
+}
 
 message(">>> Done. Outputs in: ", outdir)
+message(">>> Concordance scatter plots in: ", corr_dir)
