@@ -188,6 +188,58 @@ build_matrix <- function(dt, tax_col){
   list(mat = mat, meta = meta, long = long)
 }
 
+### pick numeric source + build genus CLR step table -----------------
+get_numeric_source <- function(dt, use_counts = 1L) {
+  # use_counts: 1 => estimated_counts (recommended); 0 => abundance
+  if (use_counts == 1L) {
+    if (!"estimated_counts" %in% names(dt)) stop("Missing column: estimated_counts")
+    return("estimated_counts")
+  } else {
+    if (!"abundance" %in% names(dt)) stop("Missing column: abundance")
+    return("abundance")
+  }
+}
+
+make_genus_clr_steps <- function(dt_raw, use_counts = 1L, pseudocount_counts = 1, pseudocount_abund = 1e-6) {
+  src <- get_numeric_source(dt_raw, use_counts)
+  
+  # build genus long table and aggregate (species -> genus happens implicitly via genus column)
+  dt <- copy(dt_raw)
+  
+  # ensure genus exists / non-empty
+  if (!"genus" %in% names(dt)) dt[, genus := NA_character_]
+  dt[is.na(genus) | genus == "", genus := "No genus"]
+  
+  # use chosen numeric source
+  dt[, value_src := suppressWarnings(as.numeric(get(src)))]
+  dt <- dt[is.finite(value_src)]
+  
+  # aggregate per genus per sample
+  genus_long <- dt[, .(
+    raw = sum(value_src, na.rm = TRUE)
+  ), by = .(file, environment, code, genus)]
+  
+  # choose pseudocount
+  pc <- if (use_counts == 1L) pseudocount_counts else pseudocount_abund
+  
+  # CLR steps computed WITHIN each sample (file)
+  genus_long[, `:=`(
+    pseudocount = pc,
+    raw_pc      = raw + pc,
+    log_raw_pc  = log(raw + pc)
+  )]
+  
+  genus_long[, mean_log := mean(log_raw_pc), by = file]
+  genus_long[, clr := log_raw_pc - mean_log]
+  
+  # nicer column order
+  setcolorder(genus_long, c("file","environment","code","genus","raw","pseudocount","raw_pc","log_raw_pc","mean_log","clr"))
+  
+  list(table = genus_long, source = src, pseudocount = pc)
+}
+### ----------------------------------------------------------------------
+
+
 # ---------- Helpers for plotting ----------
 collapse_topN_by_env <- function(long_df, N = 20){
   tmp <- copy(long_df)
@@ -284,15 +336,35 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
 read_obj <- read_and_shape(infile)
 dt_raw   <- read_obj$raw
 
+### genus-aggregated table with explicit CLR steps saved to disk
+USE_COUNTS <- as.integer(Sys.getenv("USE_COUNTS", "1"))  # keep your existing env var logic
+
+clr_obj <- make_genus_clr_steps(dt_raw, use_counts = USE_COUNTS)
+
+data.table::fwrite(
+  clr_obj$table,
+  file = file.path(outdir, paste0(prefix, "_genus_clr_steps.tsv")),
+  sep  = "\t"
+)
+
+message(">>> Wrote genus CLR steps table using source: ", clr_obj$source,
+        " (pseudocount=", clr_obj$pseudocount, ")")
+
+
+### save staging table WITHOUT the convenience `value` column
+dt_stage <- copy(dt_raw)
+dt_stage[, value := NULL]  # in case it exists from older runs
+
 fwrite(
-  dt_raw,
+  dt_stage,
   file = file.path(outdir, paste0(prefix, "_with_environment.tsv")),
   sep  = "\t"
 )
 
-# ==========================================================
-# 1) STACKED BARS
-# ==========================================================
+
+# # ==========================================================
+# # 1) STACKED BARS
+# # ==========================================================
 p_family <- make_env_stacks(
   dt_raw, "family",
   file.path(outdir, paste0(prefix, "_stacks_family.png")),
@@ -318,9 +390,9 @@ if (!is.null(p_family) && !is.null(p_genus)) {
          combined, width = 22, height = 10)
 }
 
-# ==========================================================
-# 2) ALPHA DIVERSITY (Shannon & Simpson only)
-# ==========================================================
+# # ==========================================================
+# # 2) ALPHA DIVERSITY (Shannon & Simpson only)
+# # ==========================================================
 mx_rel  <- build_matrix(dt_raw, "genus")
 mat_rel <- mx_rel$mat
 meta    <- mx_rel$meta
@@ -357,196 +429,196 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
     return(data.table(env1 = character(0), env2 = character(0),
                       metric = character(0), p_value = numeric(0)))
   }
-  
+
   cmb <- t(combn(envs, 2))
   res_list <- apply(cmb, 1, function(pair_env) {
     e1 <- pair_env[1]; e2 <- pair_env[2]
-    x <- df[environment == e1][[value_col]]
-    y <- df[environment == e2][[value_col]]
-    p <- tryCatch(
-      wilcox.test(x, y)$p.value,
-      error = function(e) NA_real_
-    )
-    data.table(env1 = e1, env2 = e2, metric = metric_name, p_value = p)
-  })
-  rbindlist(res_list)
-}
+     x <- df[environment == e1][[value_col]]
+     y <- df[environment == e2][[value_col]]
+     p <- tryCatch(
+       wilcox.test(x, y)$p.value,
+       error = function(e) NA_real_
+     )
+     data.table(env1 = e1, env2 = e2, metric = metric_name, p_value = p)
+   })
+   rbindlist(res_list)
+ }
 
-pval_to_stars <- function(p) {
-  ifelse(p < 0.001, "***",
-         ifelse(p < 0.01, "**",
-                ifelse(p < 0.05, "*", "ns")
-         )
-  )
-}
+ pval_to_stars <- function(p) {
+   ifelse(p < 0.001, "***",
+          ifelse(p < 0.01, "**",
+                 ifelse(p < 0.05, "*", "ns")
+          )
+   )
+ }
 
-build_sig_df <- function(sig_pw, df, value_col) {
-  if (nrow(sig_pw) == 0) return(NULL)
-  
-  env_levels <- levels(df$environment)
-  rng <- range(df[[value_col]], na.rm = TRUE)
-  y_min <- rng[1]; y_max <- rng[2]
-  y_step <- 0.05 * (y_max - y_min)
-  if (is.na(y_step) || y_step == 0) y_step <- 0.1
-  
-  sig_pw <- copy(sig_pw)[order(p_value)]
-  sig_pw[, idx := seq_len(.N)]
-  sig_pw[, `:=`(
-    x    = match(env1, env_levels),
-    xend = match(env2, env_levels),
-    y    = y_max + idx * y_step,
-    label = pval_to_stars(p_value)
-  )]
-  sig_pw
-}
+ build_sig_df <- function(sig_pw, df, value_col) {
+   if (nrow(sig_pw) == 0) return(NULL)
 
-pw_shannon <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
-pw_simpson <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
-pw_all <- rbind(pw_shannon, pw_simpson)
+   env_levels <- levels(df$environment)
+   rng <- range(df[[value_col]], na.rm = TRUE)
+   y_min <- rng[1]; y_max <- rng[2]
+   y_step <- 0.05 * (y_max - y_min)
+   if (is.na(y_step) || y_step == 0) y_step <- 0.1
 
-fwrite(
-  pw_all,
-  file = file.path(outdir, paste0(prefix, "_alpha_pairwise_wilcox.tsv")),
-  sep  = "\t"
-)
+   sig_pw <- copy(sig_pw)[order(p_value)]
+   sig_pw[, idx := seq_len(.N)]
+   sig_pw[, `:=`(
+     x    = match(env1, env_levels),
+     xend = match(env2, env_levels),
+     y    = y_max + idx * y_step,
+     label = pval_to_stars(p_value)
+   )]
+   sig_pw
+ }
 
-sig_shannon <- pw_shannon[!is.na(p_value) & p_value < 0.05]
-sig_simpson <- pw_simpson[!is.na(p_value) & p_value < 0.05]
+ pw_shannon <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
+ pw_simpson <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
+ pw_all <- rbind(pw_shannon, pw_simpson)
 
-sig_sh_df <- build_sig_df(sig_shannon, alpha_df, "Shannon")
-sig_sp_df <- build_sig_df(sig_simpson, alpha_df, "Simpson")
+ fwrite(
+   pw_all,
+   file = file.path(outdir, paste0(prefix, "_alpha_pairwise_wilcox.tsv")),
+   sep  = "\t"
+ )
 
-theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
+ sig_shannon <- pw_shannon[!is.na(p_value) & p_value < 0.05]
+ sig_simpson <- pw_simpson[!is.na(p_value) & p_value < 0.05]
 
-env_colors <- c(
-  "Campina"  = "#FFCC00",
-  "Floresta" = "#99CC33",
-  "Igarape"  = "#3399FF",
-  "Peneira"  = "#FF9900"
-)
+ sig_sh_df <- build_sig_df(sig_shannon, alpha_df, "Shannon")
+ sig_sp_df <- build_sig_df(sig_simpson, alpha_df, "Simpson")
 
-p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
-  geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-  geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
-                   alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-  labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
-  scale_fill_manual(values = env_colors) +
-  scale_color_manual(values = env_colors) +
-  theme_base
+ theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
 
-if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
-  p_sh <- p_sh +
-    geom_segment(
-      data = sig_sh_df,
-      aes(x = x, xend = xend, y = y, yend = y),
-      inherit.aes = FALSE
-    ) +
-    geom_text(
-      data = sig_sh_df,
-      aes(x = (x + xend) / 2, y = y, label = label),
-      vjust = -0.3, size = 3, inherit.aes = FALSE
-    )
-}
+ env_colors <- c(
+   "Campina"  = "#FFCC00",
+   "Floresta" = "#99CC33",
+   "Igarape"  = "#3399FF",
+   "Peneira"  = "#FF9900"
+ )
 
-ggsave(file.path(outdir, paste0(prefix, "_alpha_shannon_env.png")),
-       p_sh, width = 3, height = 5, dpi = 300)
+ p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
+   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
+   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
+                    alpha = 0.5, color = "black", show.legend = FALSE) +
+   geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
+   labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
+   scale_fill_manual(values = env_colors) +
+   scale_color_manual(values = env_colors) +
+   theme_base
 
-p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, color = environment)) +
-  geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-  geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
-                   alpha = 0.5, color = "black", show.legend = FALSE) +
-  geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-  labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
-  scale_fill_manual(values = env_colors) +
-  scale_color_manual(values = env_colors) +
-  theme_base
+ if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
+   p_sh <- p_sh +
+     geom_segment(
+       data = sig_sh_df,
+       aes(x = x, xend = xend, y = y, yend = y),
+       inherit.aes = FALSE
+     ) +
+     geom_text(
+       data = sig_sh_df,
+       aes(x = (x + xend) / 2, y = y, label = label),
+       vjust = -0.3, size = 3, inherit.aes = FALSE
+     )
+ }
 
-if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
-  p_sp <- p_sp +
-    geom_segment(
-      data = sig_sp_df,
-      aes(x = x, xend = xend, y = y, yend = y),
-      inherit.aes = FALSE
-    ) +
-    geom_text(
-      data = sig_sp_df,
-      aes(x = (x + xend) / 2, y = y, label = label),
-      vjust = -0.3, size = 3, inherit.aes = FALSE
-    )
-}
+ ggsave(file.path(outdir, paste0(prefix, "_alpha_shannon_env.png")),
+        p_sh, width = 3, height = 5, dpi = 300)
 
-ggsave(file.path(outdir, paste0(prefix, "_alpha_simpson_env.png")),
-       p_sp, width = 3, height = 5, dpi = 300)
+ p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, color = environment)) +
+   geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
+   geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
+                    alpha = 0.5, color = "black", show.legend = FALSE) +
+   geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
+   labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
+   scale_fill_manual(values = env_colors) +
+   scale_color_manual(values = env_colors) +
+   theme_base
 
-# ==========================================================
-# 3) BETA DIVERSITY – Bray–Curtis PCoA (Genus)
-# ==========================================================
-bray <- vegan::vegdist(rel, method = "bray")
+ if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
+   p_sp <- p_sp +
+     geom_segment(
+       data = sig_sp_df,
+       aes(x = x, xend = xend, y = y, yend = y),
+       inherit.aes = FALSE
+     ) +
+     geom_text(
+       data = sig_sp_df,
+       aes(x = (x + xend) / 2, y = y, label = label),
+       vjust = -0.3, size = 3, inherit.aes = FALSE
+     )
+ }
 
-pcoa <- cmdscale(bray, k = 2, eig = TRUE)
-eig  <- pcoa$eig
-eig[eig < 0] <- 0
-var_expl <- eig / sum(eig)
-pc1_lab <- sprintf("PC1 (%.1f%%)", 100 * var_expl[1])
-pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_expl[2])
+ ggsave(file.path(outdir, paste0(prefix, "_alpha_simpson_env.png")),
+        p_sp, width = 3, height = 5, dpi = 300)
 
-pcoa_df <- data.table::data.table(
-  file = rownames(rel),
-  PC1  = pcoa$points[, 1],
-  PC2  = pcoa$points[, 2]
-)
-pcoa_df <- merge(pcoa_df, meta, by = "file", all.x = TRUE)
-data.table::fwrite(
-  pcoa_df,
-  file = file.path(outdir, paste0(prefix, "_pcoa_braycurtis.tsv")),
-  sep  = "\t"
-)
+# # ==========================================================
+# # 3) BETA DIVERSITY – Bray–Curtis PCoA (Genus)
+# # ==========================================================
+ bray <- vegan::vegdist(rel, method = "bray")
 
-p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
-  geom_point(size = 2.5, alpha = 0.9) +
-  scale_color_manual(values = env_colors, na.value = "grey70") +
-  labs(
-    x = pc1_lab,
-    y = pc2_lab,
-    title = ""
-  ) +
-  theme_base
-ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
-       p_pcoa, width = 5, height = 4, dpi = 300)
+ pcoa <- cmdscale(bray, k = 2, eig = TRUE)
+ eig  <- pcoa$eig
+ eig[eig < 0] <- 0
+ var_expl <- eig / sum(eig)
+ pc1_lab <- sprintf("PC1 (%.1f%%)", 100 * var_expl[1])
+ pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_expl[2])
 
-# ==========================================================
-# 4) BETA STATS – PERMANOVA + betadisper
-# ==========================================================
-set.seed(2025)
-meta$environment <- factor(meta$environment)
+ pcoa_df <- data.table::data.table(
+   file = rownames(rel),
+   PC1  = pcoa$points[, 1],
+   PC2  = pcoa$points[, 2]
+ )
+ pcoa_df <- merge(pcoa_df, meta, by = "file", all.x = TRUE)
+ data.table::fwrite(
+   pcoa_df,
+   file = file.path(outdir, paste0(prefix, "_pcoa_braycurtis.tsv")),
+   sep  = "\t"
+ )
 
-perm <- vegan::adonis2(bray ~ environment,
-                       data = meta,
-                       permutations = 999)
-perm_df <- as.data.frame(perm)
-data.table::fwrite(
-  as.data.table(perm_df, keep.rownames = "term"),
-  file = file.path(outdir, paste0(prefix, "_beta_permanova.tsv")),
-  sep  = "\t"
-)
+ p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
+   geom_point(size = 2.5, alpha = 0.9) +
+   scale_color_manual(values = env_colors, na.value = "grey70") +
+   labs(
+     x = pc1_lab,
+     y = pc2_lab,
+     title = ""
+   ) +
+   theme_base
+ ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
+        p_pcoa, width = 5, height = 4, dpi = 300)
 
-bd <- vegan::betadisper(bray, meta$environment)
+# # ==========================================================
+# # 4) BETA STATS – PERMANOVA + betadisper
+# # ==========================================================
+ set.seed(2025)
+ meta$environment <- factor(meta$environment)
 
-bd_anova   <- as.data.frame(anova(bd))
-bd_perm    <- vegan::permutest(bd, permutations = 999)
-bd_perm_df <- as.data.frame(bd_perm$tab)
+ perm <- vegan::adonis2(bray ~ environment,
+                        data = meta,
+                        permutations = 999)
+ perm_df <- as.data.frame(perm)
+ data.table::fwrite(
+   as.data.table(perm_df, keep.rownames = "term"),
+   file = file.path(outdir, paste0(prefix, "_beta_permanova.tsv")),
+   sep  = "\t"
+ )
 
-data.table::fwrite(
-  as.data.table(bd_anova, keep.rownames = "term"),
-  file = file.path(outdir, paste0(prefix, "_beta_betadisper_anova.tsv")),
-  sep  = "\t"
-)
-data.table::fwrite(
-  as.data.table(bd_perm_df, keep.rownames = "term"),
-  file = file.path(outdir, paste0(prefix, "_beta_betadisper_permutest.tsv")),
-  sep  = "\t"
-)
+ bd <- vegan::betadisper(bray, meta$environment)
+
+ bd_anova   <- as.data.frame(anova(bd))
+ bd_perm    <- vegan::permutest(bd, permutations = 999)
+ bd_perm_df <- as.data.frame(bd_perm$tab)
+
+ data.table::fwrite(
+   as.data.table(bd_anova, keep.rownames = "term"),
+   file = file.path(outdir, paste0(prefix, "_beta_betadisper_anova.tsv")),
+   sep  = "\t"
+ )
+ data.table::fwrite(
+   as.data.table(bd_perm_df, keep.rownames = "term"),
+   file = file.path(outdir, paste0(prefix, "_beta_betadisper_permutest.tsv")),
+   sep  = "\t"
+ )
 
 # ==========================================================
 # 5) PER-CODE GENUS CLR CONCORDANCE (Peneira vs Floresta)
