@@ -637,6 +637,7 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
  #     - x = CLR(Floresta sample), y = CLR(Peneira sample)
  #     - each dot = ONE genus in ONE paired sample (no averaging)
  #     - pairing done by: pairing_code + replicate
+ #     - ALSO split plots by Floresta partner: L01 vs L02  
  # ==========================================================
  
  # Use the CLR table we already computed (genus-level, per sample)
@@ -674,41 +675,55 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
    allow.cartesian = TRUE
  )
  
- # If you ever get multiple matches (rare), this keeps all; OK for now.
+ # Pair id + Floresta partner label
  pairs[, pair_id := paste0(file_peneira, " vs ", file_floresta)]
  
+ pairs[, floresta_partner := fifelse(grepl("^L01_", toupper(file_floresta)), "L01",
+                                     fifelse(grepl("^L02_", toupper(file_floresta)), "L02", NA_character_))]  
+ pairs <- pairs[!is.na(floresta_partner)]                                                          
+ 
+ # --- EXCLUDE the specific bad pairing (either orientation) ---  
+ bad_peneira  <- "PENEIRA_3500_ITS.fastq.gz"
+ bad_floresta <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.fastq.gz"
+ 
+ pairs <- pairs[!(
+   (file_peneira == bad_peneira  & file_floresta == bad_floresta) |
+     (file_peneira == bad_floresta & file_floresta == bad_peneira)
+ )]                                                                 
+ 
+ # Plot per code, split by partner (L01 vs L02)
  for (cc in target_codes) {
-   df <- pairs[pairing_code == cc]
-   if (nrow(df) == 0) next
    
-   # optional: correlation across ALL dots in this code
-   ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
-   r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
-   
-   p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
-     geom_point(alpha = 0.45, size = 1.2) +
-     geom_smooth(method = "lm", se = FALSE, linewidth = 0.6, linetype = "dashed") +
-     labs(
-       title = paste0("Code ", cc, " (", MODE, ")"),
-       subtitle = sprintf("Sample-level dots (paired by replicate). Pearson R² = %.2f, p = %.2g", r2, pval),
-       x = "CLR (Floresta sample)",
-       y = "CLR (Peneira sample)"
-     ) +
-     theme_classic(base_size = 12)
-   
-   ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.png")),
-          p, width = 5.2, height = 4.2, dpi = 300)
-   ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.pdf")),
-          p, width = 5.2, height = 4.2)
-   
-   # Save the EXACT paired-dot table used in the plot
-   fwrite(
-     df[, .(pairing_code, replicate, genus,
-            file_peneira, file_floresta,
-            CLR_Peneira, CLR_Floresta, pair_id)],
-     file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_paired_dots.tsv")),
-     sep = "\t"
-   )
+   for (partner in c("L01", "L02")) {                                
+     df <- pairs[pairing_code == cc & floresta_partner == partner]   
+     if (nrow(df) == 0) next
+     
+     ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
+     r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
+     
+     p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
+       geom_point(alpha = 0.9, size = 1.2) +
+       geom_smooth(method = "lm", se = FALSE, linewidth = 0.6, linetype = "dashed", color = "grey30") +
+       labs(
+         title = paste0("Code ", cc, " — PENEIRA vs ", partner, " | Pearson R² = ", sprintf("%.2f", r2), ", p = ", signif(pval, 2)),  
+         x = "\nCLR (Floresta sample)",
+         y = "CLR (Peneira sample)\n"
+       ) +
+       theme_classic(base_size = 12)
+     
+     ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_", partner, "_scatter.png")),  
+            p, width = 5.2, height = 4.2, dpi = 300)
+     ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_", partner, "_scatter.pdf")),  
+            p, width = 5.2, height = 4.2)
+     
+     fwrite(
+       df[, .(pairing_code, replicate, genus,
+              file_peneira, file_floresta, floresta_partner,          
+              CLR_Peneira, CLR_Floresta, pair_id)],
+       file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_", partner, "_paired_dots.tsv")),  
+       sep = "\t"
+     )
+   }
  }
  
  message(">>> Concordance scatter plots in: ", corr_dir)
