@@ -82,58 +82,33 @@ if (!file.exists(infile)) {
   message(">>> Merged table written to: ", infile)
 }
 
-# ---------- Helper: add environment column ----------
-add_environment <- function(dt) {
+### extract code + replicate + pairing_code from filename -----------------
+add_code_replicate <- function(dt) {
   stopifnot("file" %in% names(dt))
   
   dt[, file_norm := toupper(file)]
-  dt[, file_norm := gsub("LO([0-9])", "L0\\1", file_norm)]
-  dt[, file_norm := gsub("IO([0-9])", "L0\\1", file_norm)]
-  dt[, file_norm := gsub("O([0-9])", "0\\1", file_norm)]
   
-  dt[, environment := NA_character_]
+  # replicate token: _I_ or _II_ or _III_
+  dt[, replicate := str_match(file_norm, "_(I|II|III)_")[, 2]]
   
-  rules <- c(
-    "^CAMP"     = "Campina",
-    "L02_500"   = "Floresta", "L02_1500" = "Floresta", "L02_2500" = "Floresta",
-    "L02_2900"  = "Igarape",  "L02_3500" = "Floresta", "L02_4500" = "Floresta",
-    "L02_4350"  = "Igarape",  "NS2_550"  = "Igarape",  "L01_4500" = "Floresta",
-    "L01_3500"  = "Floresta", "L01_3050" = "Igarape",  "L01_2500" = "Floresta",
-    "L01_1500"  = "Floresta", "TRAV_0"   = "Igarape",  "L01_500"  = "Floresta",
-    "NS1_50"    = "Igarape",
-    "^PENEIRA"  = "Peneira"
-  )
+  # code:
+  # - PENEIRA_0500_II_...  -> 0500
+  # - L01_1500_I_...       -> 1500
+  # - L02_500_I_...        -> 500
+  dt[, code := NA_character_]
+  dt[str_detect(file_norm, "^PENEIRA_"),
+     code := str_match(file_norm, "^PENEIRA_([0-9]+)_")[, 2]]
+  dt[is.na(code) & str_detect(file_norm, "^(L0[12]|NS[12])_"),
+     code := str_match(file_norm, "^(L0[12]|NS[12])_([0-9]+)_")[, 3]]
   
-  for (pat in names(rules)) {
-    dt[str_detect(file_norm, pat), environment := rules[[pat]]]
-  }
+  # pairing_code: PENEIRA_0500 pairs with Floresta 500
+  dt[, pairing_code := code]
+  dt[file_norm %like% "^PENEIRA_0500_", pairing_code := "500"]
   
   dt[, file_norm := NULL]
   dt
 }
-
-### extract numeric code from filename (0500 -> 500)
-add_code <- function(dt) {
-  stopifnot("file" %in% names(dt))
-  f <- toupper(dt$file)
-  
-  code_chr <- rep(NA_character_, length(f))
-  
-  # PENEIRA_0500_...
-  idx_p <- str_detect(f, "^PENEIRA_")
-  if (any(idx_p)) {
-    code_chr[idx_p] <- str_match(f[idx_p], "^PENEIRA_([0-9]+)_")[, 2]
-  }
-  
-  # L01_500_... or L02_1500_...
-  idx_l <- str_detect(f, "^L0[12]_")
-  if (any(idx_l)) {
-    code_chr[idx_l] <- str_match(f[idx_l], "^L0[12]_([0-9]+)_")[, 2]
-  }
-  
-  dt[, code := suppressWarnings(as.integer(code_chr))]
-  dt
-}
+### --------------------------------------------------------------------------
 
 # ---------- Read + cleaning ----------
 read_and_shape <- function(path){
@@ -145,7 +120,7 @@ read_and_shape <- function(path){
   
   if (!"file" %in% names(dt)) stop("Input must contain 'file' column")
   dt <- add_environment(dt)
-  dt <- add_code(dt)  
+  dt <- add_code_replicate(dt)  
   
   # numeric abundance + counts
   if (!"abundance" %in% names(dt)) dt[, abundance := NA_real_]
@@ -217,7 +192,7 @@ make_genus_clr_steps <- function(dt_raw, use_counts = 1L, pseudocount_counts = 1
   # aggregate per genus per sample
   genus_long <- dt[, .(
     raw = sum(value_src, na.rm = TRUE)
-  ), by = .(file, environment, code, genus)]
+  ), by = .(file, environment, code, pairing_code, replicate, genus)]
   
   # choose pseudocount
   pc <- if (use_counts == 1L) pseudocount_counts else pseudocount_abund
@@ -233,7 +208,11 @@ make_genus_clr_steps <- function(dt_raw, use_counts = 1L, pseudocount_counts = 1
   genus_long[, clr := log_raw_pc - mean_log]
   
   # nicer column order
-  setcolorder(genus_long, c("file","environment","code","genus","raw","pseudocount","raw_pc","log_raw_pc","mean_log","clr"))
+  setcolorder(
+    genus_long,
+    c("file","environment","code","pairing_code","replicate","genus",
+      "raw","pseudocount","raw_pc","log_raw_pc","mean_log","clr")
+  )
   
   list(table = genus_long, source = src, pseudocount = pc)
 }
@@ -620,80 +599,84 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
    sep  = "\t"
  )
 
-# ==========================================================
-# 5) PER-CODE GENUS CLR CONCORDANCE (Peneira vs Floresta)
-#     - One scatter plot per code
-#     - x = CLR(Floresta), y = CLR(Peneira)
-#     - dots = genera
-# ==========================================================
-dt_pf <- dt_raw[environment %in% c("Peneira", "Floresta") & !is.na(code)]
-
-target_codes <- c(500, 1500, 2500, 3500, 4500)
-dt_pf <- dt_pf[code %in% target_codes]
-
-mx_g <- build_matrix(dt_pf, "genus")
-mat_g <- mx_g$mat
-meta_g <- as.data.table(mx_g$meta)
-
-# attach code to meta (file -> code)
-meta_g <- merge(meta_g, unique(dt_pf[, .(file, code)]), by = "file", all.x = TRUE)
-
-# CLR: relative -> +pseudocount -> log -> center
-row_sums_g <- rowSums(mat_g, na.rm = TRUE); row_sums_g[row_sums_g == 0] <- 1
-rel_g <- sweep(mat_g, 1, row_sums_g, "/")
-pseudocount <- 1e-6
-rel_g <- rel_g + pseudocount
-log_g <- log(rel_g)
-clr_g <- sweep(log_g, 1, rowMeans(log_g), "-")
-
-corr_dir <- file.path(outdir, paste0(prefix, "_code_concordance_", MODE))
-dir.create(corr_dir, showWarnings = FALSE, recursive = TRUE)
-
-for (cc in target_codes) {
-  files_p <- meta_g[environment == "Peneira" & code == cc, file]
-  files_f <- meta_g[environment == "Floresta" & code == cc, file]
-  
-  if (length(files_p) == 0 || length(files_f) == 0) next
-  
-  vP <- colMeans(clr_g[files_p, , drop = FALSE], na.rm = TRUE)
-  vF <- colMeans(clr_g[files_f, , drop = FALSE], na.rm = TRUE)
-  
-  df <- data.table(
-    genus = names(vP),
-    CLR_Floresta = as.numeric(vF[names(vP)]),
-    CLR_Peneira  = as.numeric(vP)
-  )
-  df <- df[is.finite(CLR_Floresta) & is.finite(CLR_Peneira)]
-  
-  ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
-  r <- unname(ct$estimate)
-  r2 <- r^2
-  pval <- ct$p.value
-  
-  df[, resid_abs := abs(CLR_Peneira - CLR_Floresta)]
-  top_lab <- df[order(-resid_abs)][1:min(5, .N)]
-  
-  p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
-    geom_point(alpha = 0.75, size = 1.7) +
-    geom_smooth(method = "lm", se = FALSE, linewidth = 0.6, linetype = "dashed") +
-    geom_text(data = top_lab, aes(label = genus), size = 3, vjust = -0.6) +
-    labs(
-      title = paste0("Code ", cc, " (", MODE, ")"),
-      subtitle = sprintf("Pearson R² = %.2f, p = %.2g", r2, pval),
-      x = "CLR abundance (Floresta)",
-      y = "CLR abundance (Peneira)"
-    ) +
-    theme_classic(base_size = 12)
-  
-  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.png")),
-         p, width = 5.2, height = 4.2, dpi = 300)
-  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.pdf")),
-         p, width = 5.2, height = 4.2)
-  
-  fwrite(df[, .(genus, CLR_Floresta, CLR_Peneira)],
-         file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_clr.tsv")),
-         sep = "\t")
-}
-
-message(">>> Done. Outputs in: ", outdir)
-message(">>> Concordance scatter plots in: ", corr_dir)
+ # ==========================================================
+ # 5) PER-CODE SAMPLE-LEVEL GENUS CLR CONCORDANCE (Peneira vs Floresta)
+ #     - One scatter plot per pairing_code
+ #     - x = CLR(Floresta sample), y = CLR(Peneira sample)
+ #     - each dot = ONE genus in ONE paired sample (no averaging)
+ #     - pairing done by: pairing_code + replicate
+ # ==========================================================
+ 
+ # Use the CLR table we already computed (genus-level, per sample)
+ clr_tbl <- copy(clr_obj$table)
+ 
+ # keep only Peneira + Floresta, require pairing_code + replicate
+ clr_tbl <- clr_tbl[
+   environment %in% c("Peneira", "Floresta") &
+     !is.na(pairing_code) & pairing_code != "" &
+     !is.na(replicate) & replicate != ""
+ ]
+ 
+ # NOTE: codes are stored as CHARACTER (e.g. "1500", "0500")
+ target_codes <- c("500", "1500", "2500", "3500", "4500")
+ clr_tbl <- clr_tbl[pairing_code %in% target_codes]
+ 
+ corr_dir <- file.path(outdir, paste0(prefix, "_code_concordance_", MODE))
+ dir.create(corr_dir, showWarnings = FALSE, recursive = TRUE)
+ 
+ # Split by env and keep needed columns
+ fl <- clr_tbl[environment == "Floresta",
+               .(pairing_code, replicate, genus,
+                 file_floresta = file,
+                 CLR_Floresta = clr)]
+ 
+ pn <- clr_tbl[environment == "Peneira",
+               .(pairing_code, replicate, genus,
+                 file_peneira = file,
+                 CLR_Peneira = clr)]
+ 
+ # Pair by (pairing_code + replicate + genus)
+ pairs <- merge(
+   pn, fl,
+   by = c("pairing_code", "replicate", "genus"),
+   allow.cartesian = TRUE
+ )
+ 
+ # If you ever get multiple matches (rare), this keeps all; OK for now.
+ pairs[, pair_id := paste0(file_peneira, " vs ", file_floresta)]
+ 
+ for (cc in target_codes) {
+   df <- pairs[pairing_code == cc]
+   if (nrow(df) == 0) next
+   
+   # optional: correlation across ALL dots in this code
+   ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
+   r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
+   
+   p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
+     geom_point(alpha = 0.45, size = 1.2) +
+     geom_smooth(method = "lm", se = FALSE, linewidth = 0.6, linetype = "dashed") +
+     labs(
+       title = paste0("Code ", cc, " (", MODE, ")"),
+       subtitle = sprintf("Sample-level dots (paired by replicate). Pearson R² = %.2f, p = %.2g", r2, pval),
+       x = "CLR (Floresta sample)",
+       y = "CLR (Peneira sample)"
+     ) +
+     theme_classic(base_size = 12)
+   
+   ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.png")),
+          p, width = 5.2, height = 4.2, dpi = 300)
+   ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_scatter.pdf")),
+          p, width = 5.2, height = 4.2)
+   
+   # Save the EXACT paired-dot table used in the plot
+   fwrite(
+     df[, .(pairing_code, replicate, genus,
+            file_peneira, file_floresta,
+            CLR_Peneira, CLR_Floresta, pair_id)],
+     file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_paired_dots.tsv")),
+     sep = "\t"
+   )
+ }
+ 
+ message(">>> Concordance scatter plots in: ", corr_dir)
