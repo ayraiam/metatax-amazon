@@ -575,7 +575,7 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
  pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_expl[2])
 
  pcoa_df <- data.table::data.table(
-   file = rownames(rel),
+   file = rownames(rel),**
    PC1  = pcoa$points[, 1],
    PC2  = pcoa$points[, 2]
  )
@@ -702,7 +702,7 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
    r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
    
    p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
-     geom_point(alpha = 0.75, size = 1.2) +
+     geom_point(alpha = 0.55, size = 1.2) +
      geom_smooth(method = "lm", se = FALSE, linewidth = 0.6,
                  linetype = "dashed", color = "grey30") +
      labs(
