@@ -678,9 +678,8 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
  # Pair id + Floresta partner label
  pairs[, pair_id := paste0(file_peneira, " vs ", file_floresta)]
  
- pairs[, floresta_partner := fifelse(grepl("^L01_", toupper(file_floresta)), "L01",
-                                     fifelse(grepl("^L02_", toupper(file_floresta)), "L02", NA_character_))]  
- pairs <- pairs[!is.na(floresta_partner)]                                                          
+ # Keep ONLY PENEIRA ↔ L01 pairings
+ pairs <- pairs[grepl("^L01_", toupper(file_floresta))]                                                          
  
  # --- EXCLUDE the specific bad pairing (either orientation) ---  
  bad_peneira  <- "PENEIRA_3500_ITS.fastq.gz"
