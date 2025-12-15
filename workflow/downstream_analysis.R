@@ -347,6 +347,19 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
 read_obj <- read_and_shape(infile)
 dt_raw   <- read_obj$raw
 
+# ==========================================================
+# Global blacklist — remove the bad merged/hybrid library everywhere
+# ==========================================================
+BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.fastq.gz"
+
+n_before <- uniqueN(dt_raw$file)
+dt_raw   <- dt_raw[file != BAD_FILE]
+n_after  <- uniqueN(dt_raw$file)
+
+message(">>> Removed blacklisted file: ", BAD_FILE,
+        " | samples before=", n_before, " after=", n_after)
+# ==========================================================
+
 ### genus-aggregated table with explicit CLR steps saved to disk
 USE_COUNTS <- as.integer(Sys.getenv("USE_COUNTS", "1"))  # keep your existing env var logic
 
@@ -575,7 +588,7 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
  pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_expl[2])
 
  pcoa_df <- data.table::data.table(
-   file = rownames(rel),**
+   file = rownames(rel),
    PC1  = pcoa$points[, 1],
    PC2  = pcoa$points[, 2]
  )
@@ -691,7 +704,7 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
    file_floresta,
    fixed = TRUE
  )]
-         
+ 
  # plot per code ONLY (no L02 loop anymore)
  for (cc in target_codes) {
    
@@ -704,12 +717,11 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
    p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
      geom_point(alpha = 0.55, size = 1.2) +
      geom_smooth(method = "lm", se = FALSE, linewidth = 0.6,
-                 linetype = "dashed", color = "grey30") +
+                 linetype = "dashed", color = "grey30", alpha = .5) +
      labs(
-       title = paste0("Code ", cc, " — PENEIRA vs L01 | Pearson R² = ",
-                      sprintf("%.2f", r2), ", p = ", signif(pval, 2)),
-       x = "\nCLR (Floresta sample)",
-       y = "CLR (Peneira sample)\n"
+       title = paste0("Pearson R² = ", sprintf("%.2f", r2), ", p = ", signif(pval, 2)),
+       x = "\nCLR (Floresta samples)",
+       y = "CLR (Peneira samples)\n"
      ) +
      theme_classic(base_size = 12)
    
@@ -727,4 +739,5 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
    )
  }
 
+ 
  message(">>> Concordance scatter plots in: ", corr_dir)
