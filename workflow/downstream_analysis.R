@@ -686,14 +686,12 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
  pairs <- pairs[floresta_partner == "L01"]
  
  # --- EXCLUDE the specific bad pairing (either orientation) ---
- bad_peneira  <- "PENEIRA_3500_ITS.fastq.gz"
- bad_floresta <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.fastq.gz"
- 
- pairs <- pairs[!(
-   (file_peneira == bad_peneira  & file_floresta == bad_floresta) |
-     (file_peneira == bad_floresta & file_floresta == bad_peneira)
+ pairs <- pairs[!grepl(
+   "L01_3050_II_ARCH_and_PENEIRA_3500_ITS",
+   file_floresta,
+   fixed = TRUE
  )]
- 
+         
  # plot per code ONLY (no L02 loop anymore)
  for (cc in target_codes) {
    
