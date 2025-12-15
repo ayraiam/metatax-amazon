@@ -702,7 +702,7 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
    r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
    
    p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
-     geom_point(alpha = 0.9, size = 1.2) +
+     geom_point(alpha = 0.75, size = 1.2) +
      geom_smooth(method = "lm", se = FALSE, linewidth = 0.6,
                  linetype = "dashed", color = "grey30") +
      labs(
