@@ -110,6 +110,38 @@ add_code_replicate <- function(dt) {
 }
 ### --------------------------------------------------------------------------
 
+# ---------- Helper: add environment column ----------
+add_environment <- function(dt) {
+  stopifnot("file" %in% names(dt))
+  
+  # Normalize possible typos like "LO1" -> "L01" or "lO2" -> "L02"
+  dt[, file_norm := toupper(file)]
+  dt[, file_norm := gsub("LO([0-9])", "L0\\1", file_norm)]
+  dt[, file_norm := gsub("IO([0-9])", "L0\\1", file_norm)]
+  dt[, file_norm := gsub("O([0-9])", "0\\1", file_norm)]  # generic fix
+  
+  dt[, environment := NA_character_]
+  
+  rules <- c(
+    "^CAMP"     = "Campina",
+    "L02_500"   = "Floresta", "L02_1500" = "Floresta", "L02_2500" = "Floresta",
+    "L02_2900"  = "Igarape",  "L02_3500" = "Floresta", "L02_4500" = "Floresta",
+    "L02_4350"  = "Igarape",  "NS2_550"  = "Igarape",  "L01_4500" = "Floresta",
+    "L01_3500"  = "Floresta", "L01_3050" = "Igarape",  "L01_2500" = "Floresta",
+    "L01_1500"  = "Floresta", "TRAV_0"   = "Igarape",  "L01_500"  = "Floresta",
+    "NS1_50"    = "Igarape",
+    "^PENEIRA"  = "Peneira"
+  )
+  
+  # Match using normalized filenames
+  for (pat in names(rules)) {
+    dt[str_detect(file_norm, pat), environment := rules[[pat]]]
+  }
+  
+  dt[, file_norm := NULL]
+  dt
+}
+
 # ---------- Read + cleaning ----------
 read_and_shape <- function(path){
   dt <- fread(path, sep = "\t", header = TRUE, na.strings = c("", "NA"))
