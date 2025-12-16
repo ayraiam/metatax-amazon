@@ -37,7 +37,8 @@ DOWNSTREAM_ENV_NAME="emu-downstream"
 
 ### downstream input file becomes MODE-dependent (16S vs ITS)
 MODE="16S"          ### 16S or ITS
-USE_COUNTS="1"      ### 1=estimated_counts, 0=abundance (used for CLR + genus profiles)
+USE_COUNTS_0_4="0"  # Parts 0-4: abundance
+USE_COUNTS_5="1"    # Part 5: estimated_counts
 
 DOWNSTREAM_INFILE_16S="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/tables/abundance_combined.tsv"
 DOWNSTREAM_INFILE_ITS="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/tables_ITS/abundance_combined.tsv"
@@ -86,7 +87,8 @@ usage() {
   echo
   echo "Mode options (kingdom runs separately by directory):"
   echo "  --mode STR             16S or ITS (default: 16S)"
-  echo "  --use-counts INT       1=estimated_counts, 0=abundance (default: 1)"
+  echo "  --use-counts-0-4 INT   Parts 0–4: 1=estimated_counts, 0=abundance (default: 0)"
+  echo "  --use-counts-5   INT   Part 5:   1=estimated_counts, 0=abundance (default: 1)"
   echo
   echo "  -h, --help            Show this help message"
   exit 0
@@ -128,7 +130,9 @@ while [[ $# -gt 0 ]]; do
     --downstream-env) DOWNSTREAM_ENV_NAME="$2"; shift 2 ;;
     --downstream-basename) DOWNSTREAM_BASENAME="$2"; shift 2 ;;
     --mode) MODE="$2"; shift 2 ;;
-    --use-counts) USE_COUNTS="$2"; shift 2 ;;
+    --use-counts-0-4) USE_COUNTS_0_4="$2"; shift 2 ;;
+    --use-counts-5)   USE_COUNTS_5="$2"; shift 2 ;;
+
     -h|--help) usage ;;
     *) echo "Unknown argument: $1"; usage ;;
   esac
@@ -192,9 +196,9 @@ echo "Time      : $TIME"
 echo "CPUs      : $CPUS"
 echo "Memory    : $MEM"
 echo "Work dir  : $WDIR"
-### NEW
 echo "MODE      : $MODE"
-echo "USE_COUNTS: $USE_COUNTS"
+echo "USE_COUNTS_0_4: $USE_COUNTS_0_4"
+echo "USE_COUNTS_5  : $USE_COUNTS_5"
 echo "DOWN_IN   : $DOWNSTREAM_INFILE"
 echo "============================================"
 echo
@@ -290,7 +294,7 @@ if [[ "$RUN_DOWNSTREAM" -eq 1 ]]; then
     --mem="$DOWNSTREAM_MEM" \
     --time="$DOWNSTREAM_TIME" \
     --chdir="$WDIR" \
-    --export=ALL,ENV_NAME="$DOWNSTREAM_ENV_NAME",INFILE="$DOWNSTREAM_INFILE",OUTDIR="$DOWNSTREAM_OUTDIR",BASENAME="$DOWNSTREAM_BASENAME",MODE="$MODE",USE_COUNTS="$USE_COUNTS" \
+    --export=ALL,ENV_NAME="$DOWNSTREAM_ENV_NAME",INFILE="$DOWNSTREAM_INFILE",OUTDIR="$DOWNSTREAM_OUTDIR",BASENAME="$DOWNSTREAM_BASENAME",MODE="$MODE",USE_COUNTS_0_4="$USE_COUNTS_0_4",USE_COUNTS_5="$USE_COUNTS_5" \
     /bin/bash workflow/run_downstream_analysis.sh \
     1>"$DOWN_OUT_LOG" \
     2>"$DOWN_ERR_LOG"
