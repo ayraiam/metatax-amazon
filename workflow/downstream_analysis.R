@@ -27,7 +27,8 @@ if (length(args) < 2)
   stop("Usage: Rscript downstream_analysis.R <input.tsv> <output_dir> [prefix]")
 infile  <- args[1]
 outdir  <- args[2]
-prefix  <- ifelse(length(args) >= 3, args[3], "downstream")
+user_prefix <- ifelse(length(args) >= 3, args[3], "downstream")
+prefix <- paste0(user_prefix, "_", MODE)
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
 ### downstream mode + numeric source (passed from runall.sh)
