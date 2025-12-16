@@ -32,9 +32,12 @@ dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
 ### downstream mode + numeric source (passed from runall.sh)
 MODE <- toupper(Sys.getenv("MODE", "16S"))
-USE_COUNTS <- as.integer(Sys.getenv("USE_COUNTS", "1"))
 message(">>> MODE = ", MODE)
-message(">>> USE_COUNTS = ", USE_COUNTS)
+USE_COUNTS_0_4 <- as.integer(Sys.getenv("USE_COUNTS_0_4", "0"))  # abundance
+USE_COUNTS_5   <- as.integer(Sys.getenv("USE_COUNTS_5",   "1"))  # estimated_counts
+message(">>> USE_COUNTS_0_4 = ", USE_COUNTS_0_4)
+message(">>> USE_COUNTS_5   = ", USE_COUNTS_5)
+
 
 # ==========================================================
 # 0) If infile does NOT exist, merge batch tables_b*/abundance_combined.tsv
@@ -152,10 +155,10 @@ read_and_shape <- function(path){
   
   if (!"file" %in% names(dt)) stop("Input must contain 'file' column")
   
-  ### Global blacklist filter (drop bad merged/hybrid library early)
+  ## Global blacklist filter (drop bad merged/hybrid library early)
   BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.trimmed.filtered"
   dt <- dt[file != BAD_FILE]
-  ### 
+  ##
   
   dt <- add_environment(dt)
   dt <- add_code_replicate(dt)  
@@ -167,10 +170,8 @@ read_and_shape <- function(path){
   if (!"estimated_counts" %in% names(dt)) dt[, estimated_counts := NA_real_]
   suppressWarnings(dt[, estimated_counts := as.numeric(estimated_counts)])
   
-  ### unify numeric column used downstream
-  dt[, value := if (USE_COUNTS == 1) estimated_counts else abundance]
-  
-  dt <- dt[is.finite(value)]
+  # Keep both numeric columns. Only require that at least one is finite.
+  dt <- dt[is.finite(abundance) | is.finite(estimated_counts)]
   
   if (!"genus" %in% names(dt))  dt[, genus  := NA_character_]
   if (!"family" %in% names(dt)) dt[, family := NA_character_]
@@ -185,16 +186,20 @@ read_and_shape <- function(path){
 }
 
 # ---------- Matrix builder ----------
-build_matrix <- function(dt, tax_col){
+build_matrix <- function(dt, tax_col, value_col = "abundance"){
   stopifnot(tax_col %in% names(dt))
-  ### use unified 'value' instead of 'abundance'
-  long <- dt[, .(file, environment, taxon = get(tax_col), value = value)]
+  stopifnot(value_col %in% names(dt))
+  
+  long <- dt[, .(file, environment, taxon = get(tax_col), value = get(value_col))]
+  long <- long[is.finite(value)]
   long[taxon == "" | is.na(taxon), taxon := paste0("No ", tax_col)]
   long <- long[, .(value = sum(value, na.rm = TRUE)), by = .(file, environment, taxon)]
+  
   wide <- long |>
     select(file, taxon, value) |>
     pivot_wider(names_from = taxon, values_from = value, values_fill = 0) |>
     as.data.table()
+  
   meta <- unique(long[, .(file, environment)])
   setkey(meta, file); setkey(wide, file)
   mat <- as.data.frame(wide); rownames(mat) <- mat$file; mat$file <- NULL
@@ -297,11 +302,11 @@ legend_label_wrap <- function(x) {
   vapply(x, function(s) if (is.na(s)) s else gsub("\\s+", "\n", s), character(1))
 }
 
-make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_rank = "Genus"){
+make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_rank = "Genus",value_col = "abundance"){
   if (!rank_col %in% names(dt_raw)) return(invisible(NULL))
   if (all(is.na(dt_raw[[rank_col]])) || all(dt_raw[[rank_col]] == "")) return(invisible(NULL))
   
-  shaped <- build_matrix(dt_raw, tax_col = rank_col)
+  shaped <- build_matrix(dt_raw, tax_col = rank_col, value_col = value_col)
   long  <- shaped$long
   collapsed <- collapse_topN_by_env(long, N = N)
   
@@ -329,7 +334,7 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
     labs(x = NULL, y = "Relative abundance (%)") +
     theme_classic(base_size = 12) +
     theme(
-      axis.text.x = element_blank(),
+      axis.text.x = element_text(size = 5, angle = 90),#element_blank(),
       axis.ticks.x = element_blank(),
       panel.spacing.x = unit(0.02, "lines"),
       strip.text = facet_strip,
@@ -353,10 +358,11 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
 read_obj <- read_and_shape(infile)
 dt_raw   <- read_obj$raw
 
-### genus-aggregated table with explicit CLR steps saved to disk
-USE_COUNTS <- as.integer(Sys.getenv("USE_COUNTS", "1"))  # keep your existing env var logic
+# choose which numeric column Parts 1–4 will use
+VAL_0_4 <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
+message(">>> Parts 0–4 value_col = ", VAL_0_4)
 
-clr_obj <- make_genus_clr_steps(dt_raw, use_counts = USE_COUNTS)
+clr_obj <- make_genus_clr_steps(dt_raw, use_counts = USE_COUNTS_5)
 
 data.table::fwrite(
   clr_obj$table,
@@ -386,13 +392,13 @@ p_family <- make_env_stacks(
   dt_raw, "family",
   file.path(outdir, paste0(prefix, "_stacks_family.png")),
   file.path(outdir, paste0(prefix, "_stacks_family.pdf")),
-  N = 20, title_rank = "Family"
+  N = 20, title_rank = "Family", value_col = VAL_0_4
 )
 p_genus <- make_env_stacks(
   dt_raw, "genus",
   file.path(outdir, paste0(prefix, "_stacks_genus.png")),
   file.path(outdir, paste0(prefix, "_stacks_genus.pdf")),
-  N = 20, title_rank = "Genus"
+  N = 20, title_rank = "Genus", value_col = VAL_0_4
 )
 
 if (!is.null(p_family) && !is.null(p_genus)) {
@@ -410,7 +416,7 @@ if (!is.null(p_family) && !is.null(p_genus)) {
 # # ==========================================================
 # # 2) ALPHA DIVERSITY (Shannon & Simpson only)
 # # ==========================================================
-mx_rel  <- build_matrix(dt_raw, "genus")
+mx_rel  <- build_matrix(dt_raw, "genus", value_col = VAL_0_4)
 mat_rel <- mx_rel$mat
 meta    <- mx_rel$meta
 
