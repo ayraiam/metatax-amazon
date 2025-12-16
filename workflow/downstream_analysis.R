@@ -27,13 +27,13 @@ if (length(args) < 2)
   stop("Usage: Rscript downstream_analysis.R <input.tsv> <output_dir> [prefix]")
 infile  <- args[1]
 outdir  <- args[2]
-user_prefix <- ifelse(length(args) >= 3, args[3], "downstream")
-prefix <- paste0(user_prefix, "_", MODE)
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
 ### downstream mode + numeric source (passed from runall.sh)
 MODE <- toupper(Sys.getenv("MODE", "16S"))
 message(">>> MODE = ", MODE)
+user_prefix <- ifelse(length(args) >= 3, args[3], "downstream")
+prefix <- paste0(user_prefix, "_", MODE)
 USE_COUNTS_0_4 <- as.integer(Sys.getenv("USE_COUNTS_0_4", "0"))  # abundance
 USE_COUNTS_5   <- as.integer(Sys.getenv("USE_COUNTS_5",   "1"))  # estimated_counts
 message(">>> USE_COUNTS_0_4 = ", USE_COUNTS_0_4)
