@@ -151,6 +151,12 @@ read_and_shape <- function(path){
   if ("estimated counts" %in% names(dt)) setnames(dt, "estimated counts", "estimated_counts")
   
   if (!"file" %in% names(dt)) stop("Input must contain 'file' column")
+  
+  ### Global blacklist filter (drop bad merged/hybrid library early)
+  BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.trimmed.filtered"
+  dt <- dt[file != BAD_FILE]
+  ### 
+  
   dt <- add_environment(dt)
   dt <- add_code_replicate(dt)  
   
@@ -346,19 +352,6 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
 # ==========================================================
 read_obj <- read_and_shape(infile)
 dt_raw   <- read_obj$raw
-
-# ==========================================================
-# Global blacklist — remove the bad merged/hybrid library everywhere
-# ==========================================================
-BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.fastq.gz"
-
-n_before <- uniqueN(dt_raw$file)
-dt_raw   <- dt_raw[file != BAD_FILE]
-n_after  <- uniqueN(dt_raw$file)
-
-message(">>> Removed blacklisted file: ", BAD_FILE,
-        " | samples before=", n_before, " after=", n_after)
-# ==========================================================
 
 ### genus-aggregated table with explicit CLR steps saved to disk
 USE_COUNTS <- as.integer(Sys.getenv("USE_COUNTS", "1"))  # keep your existing env var logic
@@ -697,13 +690,6 @@ pairwise_wilcox <- function(df, value_col, metric_name) {
  
  # keep ONLY PENEIRA ↔ L01 pairings (as requested)
  pairs <- pairs[floresta_partner == "L01"]
- 
- # --- EXCLUDE the specific bad pairing (either orientation) ---
- pairs <- pairs[!grepl(
-   "L01_3050_II_ARCH_and_PENEIRA_3500_ITS",
-   file_floresta,
-   fixed = TRUE
- )]
  
  # plot per code ONLY (no L02 loop anymore)
  for (cc in target_codes) {
