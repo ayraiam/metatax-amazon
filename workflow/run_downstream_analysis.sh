@@ -17,7 +17,6 @@ LOGDIR="${LOGDIR:-logs}"
 mkdir -p "$LOGDIR" "$(dirname "$OUTDIR")" "$OUTDIR"
 
 log()  { echo -e ">>> $*" >&2; }
-warn() { echo -e "!!! $*" >&2; }
 die()  { echo -e "xxx $*" >&2; exit 1; }
 
 ensure_channels() {
@@ -64,14 +63,13 @@ create_env() {
 }
 
 run_downstream() {
-  # IMPORTANT: do NOT check that $INFILE exists here,
-  # the R script now auto-merges batch tables if it's missing.
   log "Running downstream_analysis.R with:"
   log "  infile  = $INFILE"
   log "  outdir  = $OUTDIR"
   log "  basename= $BASENAME"
-  log "  MODE    = ${MODE:-16S}"
-  log "  USE_COUNTS = ${USE_COUNTS:-1}"
+  log "  MODE          = ${MODE:-16S}"
+  log "  USE_COUNTS_0_4= ${USE_COUNTS_0_4:-0}"
+  log "  USE_COUNTS_5  = ${USE_COUNTS_5:-1}"
 
   Rscript workflow/downstream_analysis.R \
     "$INFILE" \
@@ -81,6 +79,5 @@ run_downstream() {
   log "Plots + tables written to: $OUTDIR"
 }
 
-#Calling functions
 create_env
 run_downstream
