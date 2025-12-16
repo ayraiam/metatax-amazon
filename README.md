@@ -83,8 +83,15 @@ MAIN OPTIONS
                           16S -> results/tables/abundance_combined.tsv
                           ITS -> results/tables_ITS/abundance_combined.tsv
 
-  --use-counts INT      Numeric column used for downstream genus-level analysis:
-                          1 = estimated_counts (default, recommended)
+  ### Numeric source selection (split behavior)
+  ### Parts 0–4 control stacked bars + alpha/beta diversity
+  ### Part 5 controls CLR concordance scatter plots
+  --use-counts-0-4 INT  Numeric column for Parts 0–4 (default: 0)
+                          0 = abundance
+                          1 = estimated_counts
+
+  --use-counts-5 INT    Numeric column for Part 5 (default: 1)
+                          1 = estimated_counts (recommended for CLR)
                           0 = abundance
 </pre>
 
@@ -135,58 +142,47 @@ EXAMPLES
 
 # 1) Run ALL stages (QC → Emu → Downstream) for 16S only (default)
 bash workflow/runall.sh --mode 16S
-
+(Defaults: Parts 0–4 use abundance; Part 5 uses estimated_counts)
 
 # 2) Run ALL stages with custom resources
 bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
 
-
 # 3) Build ONLY the ITS/LSU marker databases
 bash workflow/runall.sh --only-build-marker-dbs
-
 
 # 4) Run ONLY the QC stage
 bash workflow/runall.sh --no-emu --no-downstream
 
-
 # 5) Run ONLY Emu (QC already done) on 16S
 bash workflow/runall.sh --no-qc --no-downstream
 
-
 # 6) Run Emu on ALL FASTQs (disable 3-file test limit) for 16S
 LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --no-downstream
-
 
 # 7) Run QC + Emu, but give Emu more resources
 bash workflow/runall.sh \
   --time 06:00:00 --cpus 8 --mem 32G \
   --emu-time 12:00:00 --emu-cpus 16 --emu-mem 64G
 
-
 # 8) Run Emu with a custom ITS DB
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-db-its /path/to/its_db
-
 
 # 9) Run Emu with a custom LSU DB
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-db-lsu /path/to/lsu_db
 
-
 # 10) Run Emu on a custom FASTQ directory (skip QC)
 FASTQ_DIR_DEFAULT=/path/to/filtered \
 bash workflow/runall.sh --no-qc --no-downstream
-
 
 # 11) Run ONLY ITS + LSU (skip 16S) on ALL FASTQs
 ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=1 \
 bash workflow/runall.sh --no-qc --no-downstream
 
-
 # 12) Run ONLY 16S (explicit)
 ENABLE_16S=1 ENABLE_ITS=0 ENABLE_LSU=0 \
 bash workflow/runall.sh --no-qc --no-downstream
-
 
 # 13) Run ITS ONLY in batches (recommended for large datasets)
 #     Example: first 25 FASTQs (0–24)
@@ -205,16 +201,21 @@ FASTQ_DIR_DEFAULT=results/filtered \
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-
 # 14) Run ONLY the downstream analysis (16S)
 bash workflow/runall.sh --no-qc --no-emu --mode 16S
 
 #     Run ONLY the downstream analysis (ITS)
 bash workflow/runall.sh --no-qc --no-emu --mode ITS
 
-
 # 15) Run QC + Emu but skip downstream analysis
 bash workflow/runall.sh --no-downstream
+
+# 16) Override numeric sources explicitly (rare / advanced):
+#     - Parts 0–4: stacked bars + alpha/beta
+#     - Part 5: CLR concordance
+bash workflow/runall.sh --mode 16S \
+  --use-counts-0-4 1 \
+  --use-counts-5 0
 </pre>
 
 <pre>
@@ -251,3 +252,4 @@ https://www.linkedin.com/company/ayraiam
 </pre>
 
 <p align="center"><sub>© 2025 AY:RΔ — data and discovery in flow</sub></p>
+
