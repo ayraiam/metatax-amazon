@@ -19,8 +19,14 @@ suppressPackageStartupMessages({
   library(cowplot)
   library(RColorBrewer)
   library(ggbeeswarm)
-  library(ggrepel)  
 })
+
+# --- helpers (keep deps minimal) ------------------------------------------
+oob_squish <- function(x, range) {
+  if (!is.numeric(x)) return(x)
+  pmin(pmax(x, range[1]), range[2])
+}
+# -------------------------------------------------------------------------
 
 # ---------- Input arguments ----------
 args <- commandArgs(trailingOnly = TRUE)
@@ -260,7 +266,6 @@ make_genus_clr_steps <- function(dt_raw, use_counts = 1L, pseudocount_counts = 1
   list(table = genus_long, source = src, pseudocount = pc)
 }
 ### ----------------------------------------------------------------------
-
 
 # ---------- Helpers for plotting ----------
 collapse_topN_by_env <- function(long_df, N = 20){
@@ -646,24 +651,20 @@ data.table::fwrite(
 #     + ΔCLR color-coding + top discordant genera labels
 # ==========================================================
 
-# Use the CLR table we already computed (genus-level, per sample)
 clr_tbl <- copy(clr_obj$table)
 
-# keep only Peneira + Floresta, require pairing_code + replicate
 clr_tbl <- clr_tbl[
   environment %in% c("Peneira", "Floresta") &
     !is.na(pairing_code) & pairing_code != "" &
     !is.na(replicate) & replicate != ""
 ]
 
-# NOTE: codes are stored as CHARACTER (e.g. "1500", "0500")
 target_codes <- c("500", "1500", "2500", "3500", "4500")
 clr_tbl <- clr_tbl[pairing_code %in% target_codes]
 
 corr_dir <- file.path(outdir, paste0(prefix, "_code_concordance_", MODE))
 dir.create(corr_dir, showWarnings = FALSE, recursive = TRUE)
 
-# Split by env and keep needed columns
 fl <- clr_tbl[environment == "Floresta",
               .(pairing_code, replicate, genus,
                 file_floresta = file,
@@ -674,80 +675,67 @@ pn <- clr_tbl[environment == "Peneira",
                 file_peneira = file,
                 CLR_Peneira = clr)]
 
-# Pair by (pairing_code + replicate + genus)
 pairs <- merge(
   pn, fl,
   by = c("pairing_code", "replicate", "genus"),
   allow.cartesian = TRUE
 )
 
-# Pair id + Floresta partner label
 pairs[, pair_id := paste0(file_peneira, " vs ", file_floresta)]
 pairs[, floresta_partner := fifelse(grepl("^L01_", toupper(file_floresta)), "L01",
                                     fifelse(grepl("^L02_", toupper(file_floresta)), "L02", NA_character_))]
 
-# keep ONLY PENEIRA ↔ L01 pairings 
 pairs <- pairs[floresta_partner == "L01"]
 
-# plot per code ONLY
 for (cc in target_codes) {
   
   df <- pairs[pairing_code == cc]
   if (nrow(df) == 0) next
   
-  # ------------------------------ #
-  # ΔCLR + top discordant genera
-  # ------------------------------ #
-  df[, deltaCLR := CLR_Peneira - CLR_Floresta]  
-  df[, abs_deltaCLR := abs(deltaCLR)]          
+  df[, deltaCLR := CLR_Peneira - CLR_Floresta]
+  df[, abs_deltaCLR := abs(deltaCLR)]
   
-  # top 3 genera by mean |ΔCLR| across paired dots
   top_gen <- df[, .(mean_abs_deltaCLR = mean(abs_deltaCLR, na.rm = TRUE)),
-                by = genus][order(-mean_abs_deltaCLR)][1:min(3, .N)]  
+                by = genus][order(-mean_abs_deltaCLR)][1:min(3, .N)]
   
-  # label positions = centroid of points for those genera
   label_df <- df[genus %in% top_gen$genus,
                  .(CLR_Floresta = mean(CLR_Floresta, na.rm = TRUE),
                    CLR_Peneira  = mean(CLR_Peneira,  na.rm = TRUE),
                    genus        = first(genus),
                    mean_abs_deltaCLR = mean(abs_deltaCLR, na.rm = TRUE)),
-                 by = genus]  
+                 by = genus]
   
   fwrite(
     top_gen,
     file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_top_discordant_genera.tsv")),
     sep = "\t"
-  )  
+  )
   
-  # Pearson correlation 
   ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
   r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
   
-  # robust color limits (avoid a few extreme points dominating)
-  lim <- as.numeric(stats::quantile(abs(df$deltaCLR), probs = 0.95, na.rm = TRUE))  
-  if (!is.finite(lim) || lim == 0) lim <- max(abs(df$deltaCLR), na.rm = TRUE)       
-  if (!is.finite(lim) || lim == 0) lim <- 1                                         
+  lim <- as.numeric(stats::quantile(abs(df$deltaCLR), probs = 0.95, na.rm = TRUE))
+  if (!is.finite(lim) || lim == 0) lim <- max(abs(df$deltaCLR), na.rm = TRUE)
+  if (!is.finite(lim) || lim == 0) lim <- 1
   
   p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
-    geom_point(aes(color = deltaCLR), alpha = 0.65, size = 1.2) +  
+    geom_point(aes(color = deltaCLR), alpha = 0.65, size = 1.2) +
     geom_smooth(method = "lm", se = FALSE, linewidth = 0.6,
                 linetype = "dashed", color = "grey30", alpha = .5) +
-    scale_color_gradient2(                                          
+    scale_color_gradient2(
       low = "blue3", mid = "grey95", high = "red3",
       midpoint = 0,
       limits = c(-lim, lim),
-      oob = scales::squish,
+      oob = oob_squish,  
       name = "ΔCLR\n(Peneira − Floresta)"
     ) +
-    ggrepel::geom_text_repel(                                       
+    geom_text(  
       data = label_df,
       aes(x = CLR_Floresta, y = CLR_Peneira, label = genus),
       inherit.aes = FALSE,
       size = 3,
-      max.overlaps = Inf,
-      box.padding = 0.3,
-      point.padding = 0.2,
-      min.segment.length = 0
+      vjust = -0.6,
+      check_overlap = TRUE
     ) +
     labs(
       title = paste0("Pearson R² = ", sprintf("%.2f", r2), ", p = ", signif(pval, 2)),
@@ -755,17 +743,17 @@ for (cc in target_codes) {
       y = "CLR (Peneira samples)\n"
     ) +
     theme_classic(base_size = 12) +
-    theme(legend.position = "right")                               
+    theme(legend.position = "right")
   
-  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter_deltaCLR.png")),  
+  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter_deltaCLR.png")),
          p, width = 5.6, height = 4.4, dpi = 300)
-  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter_deltaCLR.pdf")),  
+  ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter_deltaCLR.pdf")),
          p, width = 5.6, height = 4.4)
   
   fwrite(
     df[, .(pairing_code, replicate, genus,
            file_peneira, file_floresta, floresta_partner,
-           CLR_Peneira, CLR_Floresta, deltaCLR, abs_deltaCLR, pair_id)],  
+           CLR_Peneira, CLR_Floresta, deltaCLR, abs_deltaCLR, pair_id)],
     file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_paired_dots.tsv")),
     sep = "\t"
   )
