@@ -380,7 +380,7 @@ message(">>> Wrote genus CLR steps table using source: ", clr_obj$source,
 
 ### save staging table WITHOUT the convenience `value` column
 dt_stage <- copy(dt_raw)
-dt_stage[, value := NULL]  # in case it exists from older runs
+if ("value" %in% names(dt_stage)) dt_stage[, value := NULL]  
 
 fwrite(
   dt_stage,
@@ -701,9 +701,8 @@ for (cc in target_codes) {
   label_df <- df[genus %in% top_gen$genus,
                  .(CLR_Floresta = mean(CLR_Floresta, na.rm = TRUE),
                    CLR_Peneira  = mean(CLR_Peneira,  na.rm = TRUE),
-                   genus        = first(genus),
                    mean_abs_deltaCLR = mean(abs_deltaCLR, na.rm = TRUE)),
-                 by = genus]
+                 by = genus]  
   
   fwrite(
     top_gen,
