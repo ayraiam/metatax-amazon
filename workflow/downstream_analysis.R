@@ -571,13 +571,19 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
-  # Step 7 uses USE_COUNTS_0_4 (same as parts 1–4)
+  # Step 7 uses USE_COUNTS_0_4 (same choice as parts 1–4)
   value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
   message(">>> Step 7 (ANCOM-BC2) value_col = ", value_col, " (driven by USE_COUNTS_0_4)")
   
-  if (!requireNamespace("ancombc", quietly = TRUE)) {
-    stop("Missing R package 'ancombc' (ANCOM-BC2). Your bash wrapper should install it.")
+  pkg <- NULL
+  if (requireNamespace("ANCOMBC", quietly = TRUE)) {
+    pkg <- "ANCOMBC"
+  } else if (requireNamespace("ancombc", quietly = TRUE)) {
+    pkg <- "ancombc"
+  } else {
+    stop("Missing R package 'ANCOMBC' (ANCOM-BC2). Your bash wrapper should install bioconductor-ancombc.")
   }
+  message(">>> Using ANCOM-BC2 package namespace: ", pkg)
   
   # keep only Floresta vs Peneira
   dt2 <- copy(dt_raw)[environment %in% c("Floresta", "Peneira")]
@@ -588,29 +594,30 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
                   by = .(file, environment, genus)]
   gen_long[is.na(genus) | genus == "", genus := "No genus"]
   
-  # make wide count matrix
+  # wide count/abundance matrix
   wide <- dcast(gen_long, file + environment ~ genus, value.var = "val", fill = 0)
   meta <- wide[, .(file, environment)]
   mat  <- as.matrix(wide[, setdiff(names(wide), c("file","environment")), with = FALSE])
   rownames(mat) <- wide$file
   
-  # ANCOM-BC2 expects:
-  # - data: feature table (samples x taxa)
-  # - meta_data: sample metadata with rownames matching sample IDs
   meta_df <- as.data.frame(meta)
   rownames(meta_df) <- meta_df$file
   meta_df$file <- NULL
   meta_df$environment <- factor(meta_df$environment, levels = c("Floresta", "Peneira"))
   
-  # run ANCOM-BC2 
-  res <- ancombc::ancombc2(
+  # ------------------------------ #
+  # call ancombc2 
+  # ------------------------------ #
+  ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
+  
+  res <- ancombc2_fun(
     data = mat,
     meta_data = meta_df,
     fix_formula = "environment",
     rand_formula = NULL,
     p_adj_method = "BH",
-    prv_cut = 0.10,     # prevalence filter
-    lib_cut = 0,        # no lib-size cut (we can tune later)
+    prv_cut = 0.10,
+    lib_cut = 0,
     group = "environment",
     struc_zero = TRUE,
     neg_lb = TRUE,
@@ -619,16 +626,23 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     verbose = FALSE
   )
   
-  # extract results (primary table)
-  # NOTE: ancombc2 returns lists with matrices keyed by taxa
+  # ------------------------------ #
+  # Robustly choose the right coefficient column
+  # (names vary slightly across versions)
+  # ------------------------------ #
+  coef_candidates <- colnames(res$res$lfc)
+  coef_col <- grep("^environment", coef_candidates, value = TRUE)
+  if (length(coef_col) == 0) stop("ANCOM-BC2 output does not contain an 'environment*' coefficient column.")
+  coef_col <- coef_col[1]
+  
   out <- data.table(
     genus = colnames(mat),
-    lfc   = res$res$lfc[, "environmentPeneira"],
-    se    = res$res$se[,  "environmentPeneira"],
-    W     = res$res$W[,   "environmentPeneira"],
-    p_val = res$res$p_val[, "environmentPeneira"],
-    q_val = res$res$q_val[, "environmentPeneira"],
-    diff_abn = res$res$diff_abn[, "environmentPeneira"]
+    lfc   = res$res$lfc[, coef_col],
+    se    = res$res$se[,  coef_col],
+    W     = res$res$W[,   coef_col],
+    p_val = res$res$p_val[, coef_col],
+    q_val = res$res$q_val[, coef_col],
+    diff_abn = res$res$diff_abn[, coef_col]
   )
   
   setorder(out, q_val, p_val, -abs(lfc), genus)
@@ -637,7 +651,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
          file = file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.tsv")),
          sep = "\t")
   
-  # quick volcano-like plot
+  # quick plot
   out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
   p <- ggplot(out, aes(x = lfc, y = neglog10_q)) +
     geom_point(alpha = 0.6, size = 1.2) +
@@ -652,6 +666,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   ggsave(file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.png")),
          p, width = 5.5, height = 4.2, dpi = 300)
 }
+
 
 # ==========================================================
 # Calling functions
