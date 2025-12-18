@@ -610,20 +610,46 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   # ------------------------------ #
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
-  res <- ancombc2_fun(
-    data = mat,
-    meta_data = meta_df,
-    fix_formula = "environment",
-    rand_formula = NULL,
-    p_adj_method = "BH",
-    prv_cut = 0.10,
-    lib_cut = 0,
-    group = "environment",
-    struc_zero = TRUE,
-    neg_lb = TRUE,
-    alpha = 0.05,
-    n_cl = 1,
-    verbose = FALSE
+  res <- tryCatch(
+    ancombc2_fun(
+      data = mat,
+      meta_data = meta_df,
+      taxa_are_rows = FALSE,  
+      fix_formula = "environment",
+      rand_formula = NULL,
+      p_adj_method = "BH",
+      prv_cut = 0.10,
+      lib_cut = 0,
+      group = "environment",
+      struc_zero = TRUE,
+      neg_lb = TRUE,
+      alpha = 0.05,
+      n_cl = 1,
+      verbose = FALSE
+    ),
+    error = function(e) {
+      # fallback for older ANCOMBC versions that may not have taxa_are_rows
+      if (grepl("unused argument.*taxa_are_rows", conditionMessage(e), ignore.case = TRUE)) {
+        message(">>> ancombc2() does not support taxa_are_rows; transposing matrix as fallback.")
+        ancombc2_fun(
+          data = t(mat),          # taxa become rows, samples become columns
+          meta_data = meta_df,
+          fix_formula = "environment",
+          rand_formula = NULL,
+          p_adj_method = "BH",
+          prv_cut = 0.10,
+          lib_cut = 0,
+          group = "environment",
+          struc_zero = TRUE,
+          neg_lb = TRUE,
+          alpha = 0.05,
+          n_cl = 1,
+          verbose = FALSE
+        )
+      } else {
+        stop(e)
+      }
+    }
   )
   
   # ------------------------------ #
