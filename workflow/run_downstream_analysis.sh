@@ -47,7 +47,7 @@ create_env() {
         r-base=4.3 \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-devtools \
+        r-biocmanager \
         -y
     else
       conda create -n "${ENV_NAME}" \
@@ -55,7 +55,7 @@ create_env() {
         r-base=4.3 \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-devtools \
+        r-biocmanager \
         -y
     fi
     conda activate "${ENV_NAME}"
@@ -66,46 +66,99 @@ create_env() {
 }
 
 # ----------------------------------------------------------
-# ensure ANCOMBC is installed (GitHub only)
+# ensure ANCOMBC is installed
 # ----------------------------------------------------------
 ensure_ancombc() {
   log "Checking for R package 'ANCOMBC' (ANCOM-BC2)..."
 
-  if Rscript -e 'quit(status = ifelse(requireNamespace("ANCOMBC", quietly=TRUE), 0, 1))'; then
-    log "ANCOMBC already installed."
+  # We do a 3-way classification:
+  #  - NOT_INSTALLED
+  #  - GITHUB
+  #  - BIOCONDUCTOR
+  #  - OTHER (unknown origin; we'll leave it alone unless you want to force GitHub)
+  #
+  # Heuristic:
+  #  - GitHub installs typically include RemoteType/RemoteRepo fields in package DESCRIPTION.
+  #  - Bioconductor installs typically have Repository: Bioconductor and/or biocViews field.
+
+  classify="$(
+    Rscript -e '
+      status <- "NOT_INSTALLED"
+      if (requireNamespace("ANCOMBC", quietly=TRUE)) {
+        d <- utils::packageDescription("ANCOMBC")
+        repo <- if (!is.null(d[["Repository"]])) as.character(d[["Repository"]]) else ""
+        has_bioc_views <- !is.null(d[["biocViews"]]) && nchar(as.character(d[["biocViews"]])) > 0
+
+        has_remote <- any(!is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0
+                          for (x in c("RemoteType","RemoteRepo","RemoteUsername","RemoteRef","RemoteSha")))
+
+        # GitHub/remotes/devtools install signature
+        if (has_remote) {
+          status <- "GITHUB"
+        } else if (grepl("Bioconductor", repo, ignore.case=TRUE) || has_bioc_views) {
+          status <- "BIOCONDUCTOR"
+        } else {
+          status <- "OTHER"
+        }
+      }
+      cat(status)
+    ' 2>/dev/null
+  )"
+
+  log "ANCOMBC status detected: ${classify}"
+
+  if [[ "${classify}" == "GITHUB" ]]; then
+    log "ANCOMBC is already from GitHub. Keeping it (no action)."
+    # Optional: print version
+    Rscript -e 'cat("ANCOMBC version: ", as.character(packageVersion("ANCOMBC")), "\n", sep="")' || true
     return 0
   fi
 
-  log "ANCOMBC not found. Will install from GitHub."
-
-  # --- best-effort cleanup of conda/Bioc-installed versions ---
-  # (helps avoid mixed installs / stale versions)
-  if command -v mamba >/dev/null 2>&1; then
-    log "Removing conda package if present: bioconductor-ancombc"
-    mamba remove -n "${ENV_NAME}" -y bioconductor-ancombc >/dev/null 2>&1 || true
+  if [[ "${classify}" == "BIOCONDUCTOR" ]]; then
+    log "ANCOMBC appears to be from Bioconductor. Removing it..."
+    Rscript -e 'suppressWarnings(try(remove.packages("ANCOMBC"), silent=TRUE))'
+    log "ANCOMBC removed. Installing from GitHub..."
+  elif [[ "${classify}" == "NOT_INSTALLED" ]]; then
+    log "ANCOMBC not installed. Installing from GitHub..."
   else
-    log "Removing conda package if present: bioconductor-ancombc"
-    conda remove -n "${ENV_NAME}" -y bioconductor-ancombc >/dev/null 2>&1 || true
+    # OTHER
+    log "ANCOMBC installed but origin is unclear (OTHER)."
+    log "Per your spec: only replace if Bioconductor. Keeping it (no action)."
+    # Optional: print version/path
+    Rscript -e 'cat("ANCOMBC version: ", as.character(packageVersion("ANCOMBC")), "\n", sep="")' || true
+    Rscript -e 'cat("ANCOMBC path: ", find.package("ANCOMBC"), "\n", sep="")' || true
+    return 0
   fi
 
-  # Also try removing any R-library copy (best effort; don't fail if missing)
-  Rscript -e 'try(remove.packages("ANCOMBC"), silent=TRUE); try(remove.packages("ancombc"), silent=TRUE)' || true
+  # Install from GitHub (lightweight installer: remotes)
+  # We ensure remotes exists, then install_github.
 
-  # --- install from GitHub using devtools ---
+  log "Ensuring R package 'remotes' is available..."
+  Rscript -e 'if (!requireNamespace("remotes", quietly=TRUE)) install.packages("remotes", repos="https://cloud.r-project.org")'
+
   log 'Installing ANCOMBC from GitHub: FrederickHuangLin/ANCOMBC'
-  Rscript -e '
-    if (!requireNamespace("devtools", quietly=TRUE)) {
-      install.packages("devtools", repos="https://cloud.r-project.org")
-    }
-    devtools::install_github("FrederickHuangLin/ANCOMBC", upgrade="never", dependencies=TRUE)
-  '
+  Rscript -e 'remotes::install_github("FrederickHuangLin/ANCOMBC", upgrade="never", dependencies=TRUE)'
 
-  # Final check
+  log "Verifying ANCOMBC after GitHub install..."
   if ! Rscript -e 'quit(status = ifelse(requireNamespace("ANCOMBC", quietly=TRUE), 0, 1))'; then
-    die "Failed to install ANCOMBC from GitHub. Check build deps (compilers/headers) and network."
+    die "Failed to install ANCOMBC from GitHub."
   fi
 
-  log "ANCOMBC installed via GitHub."
+  # Re-classify to confirm it’s GitHub now
+  classify2="$(
+    Rscript -e '
+      status <- "NOT_INSTALLED"
+      if (requireNamespace("ANCOMBC", quietly=TRUE)) {
+        d <- utils::packageDescription("ANCOMBC")
+        has_remote <- any(!is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0
+                          for (x in c("RemoteType","RemoteRepo","RemoteUsername","RemoteRef","RemoteSha")))
+        status <- if (has_remote) "GITHUB" else "NON_GITHUB"
+      }
+      cat(status)
+    ' 2>/dev/null
+  )"
+  log "Post-install ANCOMBC status: ${classify2}"
+  Rscript -e 'cat("ANCOMBC version: ", as.character(packageVersion("ANCOMBC")), "\n", sep="")' || true
 }
 
 run_downstream() {
