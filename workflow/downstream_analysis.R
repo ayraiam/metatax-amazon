@@ -413,7 +413,7 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix) {
   alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
   fwrite(alpha_df, file = file.path(outdir, paste0(prefix, "_alpha_diversity.tsv")), sep = "\t")
   
-  # (keeping your existing plotting/stat code as-is)
+  # (keeping existing plotting/stat code as-is)
   list(rel = rel, meta = meta, alpha_df = alpha_df)
 }
 
@@ -483,9 +483,9 @@ step4_beta_stats <- function(bray, meta, outdir, prefix) {
 }
 
 # ==========================================================
-# STEP 5: Concordance scatter 
+# STEP 5: Concordance scatter
 #   - Still computes/saves deltaCLR tables
-#   - Tables are sorted by abs_deltaCLR 
+#   - Tables are sorted by abs_deltaCLR
 # ==========================================================
 step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
   clr_tbl <- copy(clr_obj$table)
@@ -527,10 +527,8 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
     df[, deltaCLR := CLR_Peneira - CLR_Floresta]
     df[, abs_deltaCLR := abs(deltaCLR)]
     
-    # sort by abs_deltaCLR before saving
     df_out <- df[order(-abs_deltaCLR, genus, replicate, file_peneira, file_floresta)]
     
-    # Pearson correlation
     ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
     r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
     
@@ -564,14 +562,9 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
 
 # ==========================================================
 # STEP 7: Differential taxa (ANCOM-BC2)
-#   IMPORTANT: uses the SAME numeric choice as Parts 1–4
-#   i.e., USE_COUNTS_0_4 controls which column goes into ANCOM-BC2.
-#   - USE_COUNTS_0_4 = 0 -> abundance
-#   - USE_COUNTS_0_4 = 1 -> estimated_counts
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
-  # Step 7 uses USE_COUNTS_0_4 (same choice as parts 1–4)
   value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
   message(">>> Step 7 (ANCOM-BC2) value_col = ", value_col, " (driven by USE_COUNTS_0_4)")
   
@@ -594,27 +587,42 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
                   by = .(file, environment, genus)]
   gen_long[is.na(genus) | genus == "", genus := "No genus"]
   
-  # wide count/abundance matrix
+  # wide matrix: rows = samples (file), cols = genus
   wide <- dcast(gen_long, file + environment ~ genus, value.var = "val", fill = 0)
-  meta <- wide[, .(file, environment)]
+  
+  # ============================== #
+  # (Step 7 fix): enforce unique names + strict sample matching
+  # ============================== #
+  colnames(wide) <- make.unique(colnames(wide))
+  
   mat  <- as.matrix(wide[, setdiff(names(wide), c("file","environment")), with = FALSE])
   rownames(mat) <- wide$file
   
-  meta_df <- as.data.frame(meta)
-  rownames(meta_df) <- meta_df$file
-  meta_df$file <- NULL
-  meta_df$environment <- factor(meta_df$environment, levels = c("Floresta", "Peneira"))
+  meta_df <- unique(dt2[, .(file, environment)])            
+  meta_df <- as.data.frame(meta_df)                         
+  names(meta_df) <- tolower(names(meta_df))                 
+  rownames(meta_df) <- meta_df$file                         
+  meta_df$file <- NULL                                      
   
-  # ------------------------------ #
-  # call ancombc2 
-  # ------------------------------ #
+  meta_df$environment <- as.character(meta_df$environment)   
+  meta_df$environment[is.na(meta_df$environment) |
+                        meta_df$environment == ""] <- "Unknown"  
+  meta_df$environment <- factor(meta_df$environment,
+                                levels = sort(unique(meta_df$environment)))  
+  
+  common <- intersect(rownames(mat), rownames(meta_df))      
+  mat <- mat[common, , drop = FALSE]                         
+  meta_df <- meta_df[common, , drop = FALSE]                 
+  stopifnot(identical(rownames(mat), rownames(meta_df)))     
+  # ============================== #
+  
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
   res <- tryCatch(
     ancombc2_fun(
       data = mat,
       meta_data = meta_df,
-      taxa_are_rows = FALSE,  
+      taxa_are_rows = FALSE,
       fix_formula = "environment",
       rand_formula = NULL,
       p_adj_method = "BH",
@@ -628,11 +636,10 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
       verbose = FALSE
     ),
     error = function(e) {
-      # fallback for older ANCOMBC versions that may not have taxa_are_rows
       if (grepl("unused argument.*taxa_are_rows", conditionMessage(e), ignore.case = TRUE)) {
         message(">>> ancombc2() does not support taxa_are_rows; transposing matrix as fallback.")
         ancombc2_fun(
-          data = t(mat),          # taxa become rows, samples become columns
+          data = t(mat),
           meta_data = meta_df,
           fix_formula = "environment",
           rand_formula = NULL,
@@ -652,10 +659,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     }
   )
   
-  # ------------------------------ #
-  # Robustly choose the right coefficient column
-  # (names vary slightly across versions)
-  # ------------------------------ #
   coef_candidates <- colnames(res$res$lfc)
   coef_col <- grep("^environment", coef_candidates, value = TRUE)
   if (length(coef_col) == 0) stop("ANCOM-BC2 output does not contain an 'environment*' coefficient column.")
@@ -677,7 +680,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
          file = file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.tsv")),
          sep = "\t")
   
-  # quick plot
   out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
   p <- ggplot(out, aes(x = lfc, y = neglog10_q)) +
     geom_point(alpha = 0.6, size = 1.2) +
@@ -692,7 +694,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   ggsave(file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.png")),
          p, width = 5.5, height = 4.2, dpi = 300)
 }
-
 
 # ==========================================================
 # Calling functions
