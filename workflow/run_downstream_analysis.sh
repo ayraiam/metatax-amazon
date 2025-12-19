@@ -44,7 +44,7 @@ create_env() {
     if command -v mamba >/dev/null 2>&1; then
       mamba create -n "${ENV_NAME}" \
         -c conda-forge -c bioconda \
-        r-base=4.5 \
+        "r-base>=4.5" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
         r-biocmanager \
@@ -52,7 +52,7 @@ create_env() {
     else
       conda create -n "${ENV_NAME}" \
         -c conda-forge -c bioconda \
-        r-base=4.5 \
+        "r-base>=4.5" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
         r-biocmanager \
