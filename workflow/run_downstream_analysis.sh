@@ -47,7 +47,7 @@ create_env() {
         r-base=4.3 \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager \
+        r-devtools \
         -y
     else
       conda create -n "${ENV_NAME}" \
@@ -55,7 +55,7 @@ create_env() {
         r-base=4.3 \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager \
+        r-devtools \
         -y
     fi
     conda activate "${ENV_NAME}"
@@ -66,7 +66,7 @@ create_env() {
 }
 
 # ----------------------------------------------------------
-# ensure ANCOMBC is installed (conda first, then Bioc)
+# ensure ANCOMBC is installed (GitHub only)
 # ----------------------------------------------------------
 ensure_ancombc() {
   log "Checking for R package 'ANCOMBC' (ANCOM-BC2)..."
@@ -76,33 +76,36 @@ ensure_ancombc() {
     return 0
   fi
 
-  log "ANCOMBC not found. Installing..."
+  log "ANCOMBC not found. Will install from GitHub."
 
-  # First try: conda package (fastest/most reproducible when available)
+  # --- best-effort cleanup of conda/Bioc-installed versions ---
+  # (helps avoid mixed installs / stale versions)
   if command -v mamba >/dev/null 2>&1; then
-    log "Trying: mamba install -n ${ENV_NAME} -c conda-forge -c bioconda bioconductor-ancombc"
-    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-ancombc -y || true
+    log "Removing conda package if present: bioconductor-ancombc"
+    mamba remove -n "${ENV_NAME}" -y bioconductor-ancombc >/dev/null 2>&1 || true
   else
-    log "Trying: conda install -n ${ENV_NAME} -c conda-forge -c bioconda bioconductor-ancombc"
-    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-ancombc -y || true
+    log "Removing conda package if present: bioconductor-ancombc"
+    conda remove -n "${ENV_NAME}" -y bioconductor-ancombc >/dev/null 2>&1 || true
   fi
 
-  # Re-check
-  if Rscript -e 'quit(status = ifelse(requireNamespace("ANCOMBC", quietly=TRUE), 0, 1))'; then
-    log "ANCOMBC installed via conda."
-    return 0
-  fi
+  # Also try removing any R-library copy (best effort; don't fail if missing)
+  Rscript -e 'try(remove.packages("ANCOMBC"), silent=TRUE); try(remove.packages("ancombc"), silent=TRUE)' || true
 
-  # Fallback: Bioconductor install inside the env
-  log "Conda package not available or failed. Falling back to Bioconductor install..."
-  Rscript -e 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager", repos="https://cloud.r-project.org"); BiocManager::install("ANCOMBC", update=FALSE, ask=FALSE)'
+  # --- install from GitHub using devtools ---
+  log 'Installing ANCOMBC from GitHub: FrederickHuangLin/ANCOMBC'
+  Rscript -e '
+    if (!requireNamespace("devtools", quietly=TRUE)) {
+      install.packages("devtools", repos="https://cloud.r-project.org")
+    }
+    devtools::install_github("FrederickHuangLin/ANCOMBC", upgrade="never", dependencies=TRUE)
+  '
 
   # Final check
   if ! Rscript -e 'quit(status = ifelse(requireNamespace("ANCOMBC", quietly=TRUE), 0, 1))'; then
-    die "Failed to install ANCOMBC. Check your env permissions / network / Bioconductor repos."
+    die "Failed to install ANCOMBC from GitHub. Check build deps (compilers/headers) and network."
   fi
 
-  log "ANCOMBC installed via Bioconductor."
+  log "ANCOMBC installed via GitHub."
 }
 
 run_downstream() {
