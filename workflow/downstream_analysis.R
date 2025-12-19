@@ -413,7 +413,7 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix) {
   alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
   fwrite(alpha_df, file = file.path(outdir, paste0(prefix, "_alpha_diversity.tsv")), sep = "\t")
   
-  # (keeping existing plotting/stat code as-is)
+  # (keeping your existing plotting/stat code as-is)
   list(rel = rel, meta = meta, alpha_df = alpha_df)
 }
 
@@ -484,8 +484,6 @@ step4_beta_stats <- function(bray, meta, outdir, prefix) {
 
 # ==========================================================
 # STEP 5: Concordance scatter
-#   - Still computes/saves deltaCLR tables
-#   - Tables are sorted by abs_deltaCLR
 # ==========================================================
 step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
   clr_tbl <- copy(clr_obj$table)
@@ -527,8 +525,10 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
     df[, deltaCLR := CLR_Peneira - CLR_Floresta]
     df[, abs_deltaCLR := abs(deltaCLR)]
     
+    # sort by abs_deltaCLR before saving
     df_out <- df[order(-abs_deltaCLR, genus, replicate, file_peneira, file_floresta)]
     
+    # Pearson correlation
     ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
     r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
     
@@ -587,85 +587,64 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
                   by = .(file, environment, genus)]
   gen_long[is.na(genus) | genus == "", genus := "No genus"]
   
-  # wide matrix: rows = samples (file), cols = genus
+  # wide sample x genus
   wide <- dcast(gen_long, file + environment ~ genus, value.var = "val", fill = 0)
   
-  # ============================== #
-  # (Step 7 fix): enforce unique names + strict sample matching
-  # ============================== #
-  colnames(wide) <- make.unique(colnames(wide))
+  # ---------- META (must match samples) ----------
+  meta_df <- as.data.frame(wide[, .(file, environment)])
+  meta_df$file <- as.character(meta_df$file)
+  meta_df$environment <- trimws(as.character(meta_df$environment))            
+  meta_df$environment <- factor(meta_df$environment, levels = c("Floresta","Peneira"))  
+  rownames(meta_df) <- meta_df$file
+  meta_df$file <- NULL
   
-  mat  <- as.matrix(wide[, setdiff(names(wide), c("file","environment")), with = FALSE])
+  # ---------- FEATURE TABLE ----------
+  mat <- as.matrix(wide[, setdiff(names(wide), c("file","environment")), with = FALSE])
   rownames(mat) <- wide$file
   
-  meta_df <- unique(dt2[, .(file, environment)])            
-  meta_df <- as.data.frame(meta_df)                         
-  names(meta_df) <- tolower(names(meta_df))                 
-  rownames(meta_df) <- meta_df$file                         
-  meta_df$file <- NULL                                      
+  # ### CHANGED: ANCOM-BC2 expects taxa/features as ROWS and samples as COLUMNS for generic matrices
+  data_for_ancom <- t(mat)                     # taxa x samples
+  storage.mode(data_for_ancom) <- "numeric"    #
   
-  meta_df$environment <- as.character(meta_df$environment)   
-  meta_df$environment[is.na(meta_df$environment) |
-                        meta_df$environment == ""] <- "Unknown"  
-  meta_df$environment <- factor(meta_df$environment,
-                                levels = sort(unique(meta_df$environment)))  
+  # ### CHANGED: force exact sample alignment + drop any NA environments
+  common <- intersect(colnames(data_for_ancom), rownames(meta_df))
+  data_for_ancom <- data_for_ancom[, common, drop = FALSE]
+  meta_df <- meta_df[common, , drop = FALSE]
+  keep <- !is.na(meta_df$environment)
+  data_for_ancom <- data_for_ancom[, keep, drop = FALSE]
+  meta_df <- meta_df[keep, , drop = FALSE]
   
-  common <- intersect(rownames(mat), rownames(meta_df))      
-  mat <- mat[common, , drop = FALSE]                         
-  meta_df <- meta_df[common, , drop = FALSE]                 
-  stopifnot(identical(rownames(mat), rownames(meta_df)))     
-  # ============================== #
+  # sanity check prints (small, but super useful on HPC logs)
+  message(">>> Step 7: data dims (taxa x samples) = ", nrow(data_for_ancom), " x ", ncol(data_for_ancom))  
+  message(">>> Step 7: meta rows = ", nrow(meta_df), "; meta cols = ", paste(colnames(meta_df), collapse = ",")) 
   
+  # call ancombc2
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
-  res <- tryCatch(
-    ancombc2_fun(
-      data = mat,
-      meta_data = meta_df,
-      taxa_are_rows = FALSE,
-      fix_formula = "environment",
-      rand_formula = NULL,
-      p_adj_method = "BH",
-      prv_cut = 0.10,
-      lib_cut = 0,
-      group = "environment",
-      struc_zero = TRUE,
-      neg_lb = TRUE,
-      alpha = 0.05,
-      n_cl = 1,
-      verbose = FALSE
-    ),
-    error = function(e) {
-      if (grepl("unused argument.*taxa_are_rows", conditionMessage(e), ignore.case = TRUE)) {
-        message(">>> ancombc2() does not support taxa_are_rows; transposing matrix as fallback.")
-        ancombc2_fun(
-          data = t(mat),
-          meta_data = meta_df,
-          fix_formula = "environment",
-          rand_formula = NULL,
-          p_adj_method = "BH",
-          prv_cut = 0.10,
-          lib_cut = 0,
-          group = "environment",
-          struc_zero = TRUE,
-          neg_lb = TRUE,
-          alpha = 0.05,
-          n_cl = 1,
-          verbose = FALSE
-        )
-      } else {
-        stop(e)
-      }
-    }
+  res <- ancombc2_fun(
+    data = data_for_ancom,          
+    meta_data = meta_df,
+    fix_formula = "environment",
+    rand_formula = NULL,
+    p_adj_method = "BH",
+    prv_cut = 0.10,
+    lib_cut = 0,
+    group = "environment",
+    struc_zero = TRUE,
+    neg_lb = TRUE,
+    alpha = 0.05,
+    n_cl = 1,
+    verbose = FALSE
   )
   
+  # robust coefficient picking
   coef_candidates <- colnames(res$res$lfc)
   coef_col <- grep("^environment", coef_candidates, value = TRUE)
   if (length(coef_col) == 0) stop("ANCOM-BC2 output does not contain an 'environment*' coefficient column.")
   coef_col <- coef_col[1]
   
   out <- data.table(
-    genus = colnames(mat),
+    genus = rownames(res$res$lfc),
     lfc   = res$res$lfc[, coef_col],
     se    = res$res$se[,  coef_col],
     W     = res$res$W[,   coef_col],
@@ -680,6 +659,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
          file = file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.tsv")),
          sep = "\t")
   
+  # quick plot
   out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
   p <- ggplot(out, aes(x = lfc, y = neglog10_q)) +
     geom_point(alpha = 0.6, size = 1.2) +
