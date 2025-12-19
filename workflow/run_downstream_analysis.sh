@@ -71,68 +71,90 @@ create_env() {
 ensure_ancombc() {
   log "Checking for R package 'ANCOMBC' (ANCOM-BC2)..."
 
-  # We do a 3-way classification:
-  #  - NOT_INSTALLED
-  #  - GITHUB
-  #  - BIOCONDUCTOR
-  #  - OTHER (unknown origin; we'll leave it alone unless you want to force GitHub)
+  # IMPORTANT: because we run with `set -e`, any failing `Rscript -e` will kill the job.
+  # So we:
+  #  1) run R classification in a "safe" way (capture stdout; if fails, set classify=UNKNOWN)
+  #  2) log the raw classification result
+
+  classify="UNKNOWN"
+
+  # Robust classification (valid R code):
+  # - GitHub installs usually have RemoteType/RemoteRepo/etc in DESCRIPTION
+  # - Bioconductor installs usually have Repository: Bioconductor OR biocViews
   #
-  # Heuristic:
-  #  - GitHub installs typically include RemoteType/RemoteRepo fields in package DESCRIPTION.
-  #  - Bioconductor installs typically have Repository: Bioconductor and/or biocViews field.
+  # This R block MUST NEVER error; we wrap it in tryCatch and always cat() a status.
 
   classify="$(
     Rscript -e '
-      status <- "NOT_INSTALLED"
-      if (requireNamespace("ANCOMBC", quietly=TRUE)) {
-        d <- utils::packageDescription("ANCOMBC")
-        repo <- if (!is.null(d[["Repository"]])) as.character(d[["Repository"]]) else ""
-        has_bioc_views <- !is.null(d[["biocViews"]]) && nchar(as.character(d[["biocViews"]])) > 0
-
-        has_remote <- any(!is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0
-                          for (x in c("RemoteType","RemoteRepo","RemoteUsername","RemoteRef","RemoteSha")))
-
-        # GitHub/remotes/devtools install signature
-        if (has_remote) {
-          status <- "GITHUB"
-        } else if (grepl("Bioconductor", repo, ignore.case=TRUE) || has_bioc_views) {
-          status <- "BIOCONDUCTOR"
+      out <- "UNKNOWN"
+      tryCatch({
+        if (!requireNamespace("ANCOMBC", quietly=TRUE)) {
+          out <- "NOT_INSTALLED"
         } else {
-          status <- "OTHER"
+          d <- utils::packageDescription("ANCOMBC")
+
+          repo <- ""
+          if (!is.null(d[["Repository"]])) repo <- as.character(d[["Repository"]])
+
+          has_bioc_views <- FALSE
+          if (!is.null(d[["biocViews"]])) {
+            bv <- as.character(d[["biocViews"]])
+            has_bioc_views <- nchar(bv) > 0
+          }
+
+          remote_fields <- c("RemoteType","RemoteRepo","RemoteUsername","RemoteRef","RemoteSha")
+          has_remote <- any(sapply(remote_fields, function(x) {
+            !is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0
+          }))
+
+          if (has_remote) {
+            out <- "GITHUB"
+          } else if (grepl("Bioconductor", repo, ignore.case=TRUE) || has_bioc_views) {
+            out <- "BIOCONDUCTOR"
+          } else {
+            out <- "OTHER"
+          }
         }
-      }
-      cat(status)
-    ' 2>/dev/null
+      }, error=function(e) {
+        out <- "UNKNOWN"
+      })
+      cat(out)
+    ' 2>/dev/null || echo "UNKNOWN"
   )"
+  ### CHANGED ###
 
   log "ANCOMBC status detected: ${classify}"
 
+  ### CHANGED ###
+  # Extra debug info (won't crash if missing)
+  if Rscript -e 'quit(status = ifelse(requireNamespace("ANCOMBC", quietly=TRUE), 0, 1))' >/dev/null 2>&1; then
+    Rscript -e 'cat("ANCOMBC version: ", as.character(packageVersion("ANCOMBC")), "\n", sep="")' || true
+    Rscript -e 'cat("ANCOMBC path: ", find.package("ANCOMBC"), "\n", sep="")' || true
+  fi
+  ### CHANGED ###
+
   if [[ "${classify}" == "GITHUB" ]]; then
     log "ANCOMBC is already from GitHub. Keeping it (no action)."
-    # Optional: print version
-    Rscript -e 'cat("ANCOMBC version: ", as.character(packageVersion("ANCOMBC")), "\n", sep="")' || true
     return 0
   fi
 
   if [[ "${classify}" == "BIOCONDUCTOR" ]]; then
     log "ANCOMBC appears to be from Bioconductor. Removing it..."
-    Rscript -e 'suppressWarnings(try(remove.packages("ANCOMBC"), silent=TRUE))'
+    Rscript -e 'suppressWarnings(try(remove.packages("ANCOMBC"), silent=TRUE))' || true
     log "ANCOMBC removed. Installing from GitHub..."
   elif [[ "${classify}" == "NOT_INSTALLED" ]]; then
     log "ANCOMBC not installed. Installing from GitHub..."
-  else
-    # OTHER
+  elif [[ "${classify}" == "OTHER" ]]; then
     log "ANCOMBC installed but origin is unclear (OTHER)."
     log "Per your spec: only replace if Bioconductor. Keeping it (no action)."
-    # Optional: print version/path
-    Rscript -e 'cat("ANCOMBC version: ", as.character(packageVersion("ANCOMBC")), "\n", sep="")' || true
-    Rscript -e 'cat("ANCOMBC path: ", find.package("ANCOMBC"), "\n", sep="")' || true
+    return 0
+  else
+    log "ANCOMBC status is UNKNOWN (classification failed)."
+    log "Per your spec: only replace if Bioconductor. Keeping it (no action)."
     return 0
   fi
 
-  # Install from GitHub (lightweight installer: remotes)
-  # We ensure remotes exists, then install_github.
-
+  # Install from GitHub (use remotes)
   log "Ensuring R package 'remotes' is available..."
   Rscript -e 'if (!requireNamespace("remotes", quietly=TRUE)) install.packages("remotes", repos="https://cloud.r-project.org")'
 
@@ -147,18 +169,25 @@ ensure_ancombc() {
   # Re-classify to confirm it’s GitHub now
   classify2="$(
     Rscript -e '
-      status <- "NOT_INSTALLED"
-      if (requireNamespace("ANCOMBC", quietly=TRUE)) {
-        d <- utils::packageDescription("ANCOMBC")
-        has_remote <- any(!is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0
-                          for (x in c("RemoteType","RemoteRepo","RemoteUsername","RemoteRef","RemoteSha")))
-        status <- if (has_remote) "GITHUB" else "NON_GITHUB"
-      }
-      cat(status)
-    ' 2>/dev/null
+      out <- "UNKNOWN"
+      tryCatch({
+        if (!requireNamespace("ANCOMBC", quietly=TRUE)) {
+          out <- "NOT_INSTALLED"
+        } else {
+          d <- utils::packageDescription("ANCOMBC")
+          remote_fields <- c("RemoteType","RemoteRepo","RemoteUsername","RemoteRef","RemoteSha")
+          has_remote <- any(sapply(remote_fields, function(x) {
+            !is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0
+          }))
+          out <- if (has_remote) "GITHUB" else "NON_GITHUB"
+        }
+      }, error=function(e) { out <- "UNKNOWN" })
+      cat(out)
+    ' 2>/dev/null || echo "UNKNOWN"
   )"
   log "Post-install ANCOMBC status: ${classify2}"
   Rscript -e 'cat("ANCOMBC version: ", as.character(packageVersion("ANCOMBC")), "\n", sep="")' || true
+  Rscript -e 'cat("ANCOMBC path: ", find.package("ANCOMBC"), "\n", sep="")' || true
 }
 
 run_downstream() {
