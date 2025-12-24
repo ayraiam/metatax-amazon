@@ -561,25 +561,28 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
 }
 
 # ==========================================================
-# STEP 7: Differential taxa (ANCOM-BC2)
+# STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ (workaround)
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
   value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
   message(">>> Step 7 (ANCOM-BC2) value_col = ", value_col, " (driven by USE_COUNTS_0_4)")
   
-  pkg <- NULL
-  if (requireNamespace("ANCOMBC", quietly = TRUE)) {
-    pkg <- "ANCOMBC"
-  } else if (requireNamespace("ancombc", quietly = TRUE)) {
-    pkg <- "ancombc"
-  } else {
-    stop("Missing R package 'ANCOMBC' (ANCOM-BC2).")
-  }
+  suppressPackageStartupMessages({
+    if (!requireNamespace("ANCOMBC", quietly = TRUE) && !requireNamespace("ancombc", quietly = TRUE)) {
+      stop("Missing R package ANCOMBC/ancombc.")
+    }
+    if (!requireNamespace("phyloseq", quietly = TRUE)) {
+      stop("Missing R package 'phyloseq'. Install it (conda: bioconductor-phyloseq or R: BiocManager::install('phyloseq')).")
+    }
+    library(phyloseq)
+  })
+  
+  pkg <- if (requireNamespace("ANCOMBC", quietly = TRUE)) "ANCOMBC" else "ancombc"
   message(">>> Using ANCOM-BC2 package namespace: ", pkg)
   
   # keep only Floresta vs Peneira
-  dt2 <- copy(dt_raw)[environment %in% c("Floresta", "Peneira")]
+  dt2 <- data.table::copy(dt_raw)[environment %in% c("Floresta", "Peneira")]
   dt2 <- dt2[is.finite(get(value_col))]
   
   # aggregate to genus per sample
@@ -588,77 +591,42 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   gen_long[is.na(genus) | genus == "", genus := "No genus"]
   
   # wide sample x genus
-  wide <- dcast(gen_long, file + environment ~ genus, value.var = "val", fill = 0)
+  wide <- data.table::dcast(gen_long, file + environment ~ genus, value.var = "val", fill = 0)
   
-  # ---------- META (must match samples) ----------
+  # ----- metadata -----
   meta_df <- as.data.frame(wide[, .(file, environment)])
-  
-  # rename column
   colnames(meta_df)[colnames(meta_df) == "environment"] <- "env_group"
-  
-  # Set as factor with proper levels
   meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
-  meta_df$file <- as.character(meta_df$file)
   rownames(meta_df) <- meta_df$file
   meta_df$file <- NULL
   
-  # ---------- FEATURE TABLE ----------
+  # ----- OTU table (taxa x samples) -----
   mat <- as.matrix(wide[, setdiff(names(wide), c("file", "environment")), with = FALSE])
   rownames(mat) <- wide$file
+  otu <- t(mat)  # taxa x samples
+  storage.mode(otu) <- "numeric"
   
-  # ANCOM-BC2 expects taxa/features as ROWS and samples as COLUMNS
-  data_for_ancom <- t(mat)                     # taxa x samples
-  storage.mode(data_for_ancom) <- "numeric"
-  
-  # force exact sample alignment
-  common <- intersect(colnames(data_for_ancom), rownames(meta_df))
-  if (length(common) == 0) stop(">>> Step 7 ERROR: No common samples between data matrix and metadata!")
-  
-  data_for_ancom <- data_for_ancom[, common, drop = FALSE]
+  # Align sample names explicitly (phyloseq requires exact matching)
+  common <- intersect(colnames(otu), rownames(meta_df))
+  if (length(common) < 2) stop(">>> Step 7 ERROR: too few common samples between otu and meta.")
+  otu <- otu[, common, drop = FALSE]
   meta_df <- meta_df[common, , drop = FALSE]
   
-  # Remove any samples with NA group
-  keep <- !is.na(meta_df$env_group)
-  data_for_ancom <- data_for_ancom[, keep, drop = FALSE]
-  meta_df <- meta_df[keep, , drop = FALSE]
-  
-  # ==========================================================
-  # HARDEN meta_df to a plain base data.frame
-  # (prevents data.table / drop-to-vector / 0-col weirdness)
-  # ==========================================================
-  meta_df <- data.frame(
-    env_group = meta_df$env_group,
-    row.names = rownames(meta_df),
-    stringsAsFactors = FALSE
+  # build phyloseq object
+  ps <- phyloseq(
+    otu_table(otu, taxa_are_rows = TRUE),
+    sample_data(meta_df)
   )
-  meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
   
-  # enforce exact column name + trim just in case
-  colnames(meta_df) <- trimws(colnames(meta_df))
+  message(">>> Step 7: phyloseq built. taxa=", ntaxa(ps), " samples=", nsamples(ps))
+  message(">>> Step 7: sample vars in phyloseq = ", paste(colnames(as(sample_data(ps), "data.frame")), collapse = ","))
   
-  #  sanity checks that fail early with a clear message
-  message(">>> Step 7 DEBUG: meta_df colnames = ", paste(colnames(meta_df), collapse = ","))
-  if (!"env_group" %in% colnames(meta_df)) {
-    stop(">>> Step 7 ERROR: meta_df does not contain 'env_group'. colnames(meta_df) = ",
-         paste(colnames(meta_df), collapse = ","))
-  }
-  
-  # prints
-  message(">>> Step 7: data dims (taxa x samples) = ", nrow(data_for_ancom), " x ", ncol(data_for_ancom))
-  message(">>> Step 7: meta rows = ", nrow(meta_df), "; meta cols = ", paste(colnames(meta_df), collapse = ","))
-  message(">>> Step 7: Sample count = ", ncol(data_for_ancom))
-  
-  # call ancombc2
+  # call ANCOM-BC2 on phyloseq object
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
-  # ==========================================================
-  # pass fix_formula as a formula object
-  # (avoids any string parsing edge cases)
-  # ==========================================================
   res <- ancombc2_fun(
-    data = data_for_ancom,
-    meta_data = meta_df,
-    fix_formula = env_group ~ 1,
+    data = ps,                     
+    fix_formula = "env_group",      # formula refers to sample_data(ps)
     rand_formula = NULL,
     p_adj_method = "BH",
     prv_cut = 0.10,
@@ -670,11 +638,8 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     verbose = TRUE
   )
   
-  # robust coefficient picking
+  # pick coefficient column
   coef_candidates <- colnames(res$res$lfc)
-  
-  # coefficient name now won’t start with "env_group" if formula is env_group ~ 1
-  # In ANCOMBC2, it is often "env_groupPeneira" (reference Floresta)
   coef_col <- grep("^env_group", coef_candidates, value = TRUE)
   if (length(coef_col) == 0) coef_col <- grep("Peneira|Floresta", coef_candidates, value = TRUE)
   if (length(coef_col) == 0) {
@@ -683,7 +648,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   }
   coef_col <- coef_col[1]
   
-  out <- data.table(
+  out <- data.table::data.table(
     genus = rownames(res$res$lfc),
     lfc   = res$res$lfc[, coef_col],
     se    = res$res$se[,  coef_col],
@@ -694,31 +659,36 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   )
   
   out[, lfc_direction := ifelse(lfc > 0, "Higher in Peneira", "Higher in Floresta")]
-  setorder(out, q_val, p_val, -abs(lfc), genus)
+  data.table::setorder(out, q_val, p_val, -abs(lfc), genus)
   
-  fwrite(out,
-         file = file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.tsv")),
-         sep = "\t")
+  data.table::fwrite(
+    out,
+    file = file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.tsv")),
+    sep = "\t"
+  )
   
+  # volcano
   out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
   out[, significance := ifelse(q_val < 0.05, "q < 0.05", "ns")]
   
-  p <- ggplot(out, aes(x = lfc, y = neglog10_q, color = significance)) +
-    geom_point(alpha = 0.6, size = 1.2) +
-    geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.6) +
-    geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.4) +
-    scale_color_manual(values = c("q < 0.05" = "red", "ns" = "grey60")) +
-    labs(
+  p <- ggplot2::ggplot(out, ggplot2::aes(x = lfc, y = neglog10_q, color = significance)) +
+    ggplot2::geom_point(alpha = 0.6, size = 1.2) +
+    ggplot2::geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.6) +
+    ggplot2::geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.4) +
+    ggplot2::scale_color_manual(values = c("q < 0.05" = "red", "ns" = "grey60")) +
+    ggplot2::labs(
       x = "Log fold-change (Peneira vs Floresta)",
       y = "-log10(q-value)",
       title = "ANCOM-BC2 (genus): Peneira vs Floresta",
       color = "Significance"
     ) +
-    theme_classic(base_size = 12) +
-    theme(legend.position = "bottom")
+    ggplot2::theme_classic(base_size = 12) +
+    ggplot2::theme(legend.position = "bottom")
   
-  ggsave(file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.png")),
-         p, width = 6, height = 5, dpi = 300)
+  ggplot2::ggsave(
+    file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.png")),
+    p, width = 6, height = 5, dpi = 300
+  )
   
   message(">>> Step 7: ANCOM-BC2 completed successfully. Found ",
           sum(out$q_val < 0.05, na.rm = TRUE), " significant genera at q < 0.05.")
