@@ -3,7 +3,7 @@
 # Script: workflow/run_downstream_analysis.sh
 # Purpose:
 #   - Create/activate a clean env for downstream analysis
-#   - Ensure ANCOMBC (for ANCOM-BC2) is available
+#   - Ensure ANCOMBC (for ANCOM-BC2) is available (GitHub preferred)
 #   - Run downstream_analysis.R
 # ==========================================================
 set -euo pipefail
@@ -44,18 +44,20 @@ create_env() {
     if command -v mamba >/dev/null 2>&1; then
       mamba create -n "${ENV_NAME}" \
         -c conda-forge -c bioconda \
-        "r-base>=4.5" \
+        "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
         r-biocmanager \
+        r-remotes \
         -y
     else
       conda create -n "${ENV_NAME}" \
         -c conda-forge -c bioconda \
-        "r-base>=4.5" \
+        "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
         r-biocmanager \
+        r-remotes \
         -y
     fi
     conda activate "${ENV_NAME}"
@@ -63,38 +65,31 @@ create_env() {
 
   command -v Rscript >/dev/null 2>&1 || die "Rscript not available in env."
   log "Env ready: $(which Rscript)"
+
+  ### hard fail if R < 4.5 (prevents silent downgrade surprises)
+  Rscript -e 'v <- getRversion(); cat(">>> R version in env: ", v, "\n", sep=""); quit(status=ifelse(v < "4.5.0", 1, 0))' \
+    || die "R < 4.5.0 detected in env. Delete env and recreate (see instructions)."
 }
 
 # ----------------------------------------------------------
-# ### CHANGED ### Install core Bioconductor deps via conda/mamba
+# Install Bioconductor deps via BiocManager (inside R)
 # ----------------------------------------------------------
-install_ancombc_deps_conda() {
-  log "Ensuring core Bioconductor dependencies (DelayedArray/GenomicRanges/etc) are installed via conda..."
+install_bioc_deps_r() {
+  log "Installing required Bioconductor dependencies via BiocManager (R-side, matches your R=4.5.*)..."
 
-  local pkgs=(
-    bioconductor-delayedarray
-    bioconductor-genomicranges
-    bioconductor-summarizedexperiment
-    bioconductor-sparsearray
-    bioconductor-delayedmatrixstats
-    bioconductor-biostrings
-    bioconductor-iranges
-    bioconductor-s4vectors
-    bioconductor-xvector
-    bioconductor-genomeinfodb
-    bioconductor-genomeinfodbdata
-    r-matrix
-  )
-
-  if command -v mamba >/dev/null 2>&1; then
-    log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda ${pkgs[*]}"
-    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda "${pkgs[@]}" -y
-  else
-    log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda ${pkgs[*]}"
-    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda "${pkgs[@]}" -y
-  fi
-
-  log "Core Bioconductor deps installed (conda)."
+  Rscript -e '
+    if (!requireNamespace("BiocManager", quietly=TRUE)) {
+      install.packages("BiocManager", repos="https://cloud.r-project.org")
+    }
+    cat(">>> Bioconductor version: ", as.character(BiocManager::version()), "\n", sep="")
+    pkgs <- c(
+      "SummarizedExperiment","GenomicRanges","DelayedArray","SparseArray",
+      "DelayedMatrixStats","Biostrings","IRanges","S4Vectors","XVector",
+      "GenomeInfoDb","GenomeInfoDbData"
+    )
+    BiocManager::install(pkgs, update=FALSE, ask=FALSE)
+  '
+  log "Bioconductor dependency install completed (R-side)."
 }
 
 # ----------------------------------------------------------
@@ -105,7 +100,6 @@ ensure_ancombc() {
 
   classify="UNKNOWN"
 
-  # Robust classification (never crash the bash script)
   classify="$(
     Rscript -e '
       out <- "UNKNOWN"
@@ -114,32 +108,15 @@ ensure_ancombc() {
           out <- "NOT_INSTALLED"
         } else {
           d <- utils::packageDescription("ANCOMBC")
-
-          repo <- ""
-          if (!is.null(d[["Repository"]])) repo <- as.character(d[["Repository"]])
-
-          has_bioc_views <- FALSE
-          if (!is.null(d[["biocViews"]])) {
-            bv <- as.character(d[["biocViews"]])
-            has_bioc_views <- nchar(bv) > 0
-          }
-
+          repo <- if (!is.null(d[["Repository"]])) as.character(d[["Repository"]]) else ""
+          has_bioc_views <- !is.null(d[["biocViews"]]) && nchar(as.character(d[["biocViews"]])) > 0
           remote_fields <- c("RemoteType","RemoteRepo","RemoteUsername","RemoteRef","RemoteSha")
-          has_remote <- any(sapply(remote_fields, function(x) {
-            !is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0
-          }))
-
-          if (has_remote) {
-            out <- "GITHUB"
-          } else if (grepl("Bioconductor", repo, ignore.case=TRUE) || has_bioc_views) {
-            out <- "BIOCONDUCTOR"
-          } else {
-            out <- "OTHER"
-          }
+          has_remote <- any(sapply(remote_fields, function(x) !is.null(d[[x]]) && nchar(as.character(d[[x]])) > 0))
+          if (has_remote) out <- "GITHUB"
+          else if (grepl("Bioconductor", repo, ignore.case=TRUE) || has_bioc_views) out <- "BIOCONDUCTOR"
+          else out <- "OTHER"
         }
-      }, error=function(e) {
-        out <- "UNKNOWN"
-      })
+      }, error=function(e) out <- "UNKNOWN")
       cat(out)
     ' 2>/dev/null || echo "UNKNOWN"
   )"
@@ -165,14 +142,11 @@ ensure_ancombc() {
     return 0
   fi
 
-  # Ensure Bioconductor dependency chain is satisfied via conda first
-  install_ancombc_deps_conda
+  ### install deps via BiocManager (NOT conda) to avoid r-base<4.5 solver conflicts
+  install_bioc_deps_r
 
-  # Install from GitHub WITHOUT pulling huge dependency trees
-  log "Ensuring R package 'remotes' is available..."
-  Rscript -e 'if (!requireNamespace("remotes", quietly=TRUE)) install.packages("remotes", repos="https://cloud.r-project.org")'
-
-  log 'Installing ANCOMBC from GitHub (dependencies=FALSE): FrederickHuangLin/ANCOMBC'
+  ### install from GitHub (keep dependencies=FALSE since we installed deps above)
+  log "Installing ANCOMBC from GitHub (dependencies=FALSE): FrederickHuangLin/ANCOMBC"
   Rscript -e 'remotes::install_github("FrederickHuangLin/ANCOMBC", upgrade="never", dependencies=FALSE)'
 
   log "Verifying ANCOMBC after GitHub install..."
@@ -186,7 +160,6 @@ ensure_ancombc() {
 }
 
 run_downstream() {
-
   export USE_COUNTS_0_4="${USE_COUNTS_0_4:-0}"
   export USE_COUNTS_5="${USE_COUNTS_5:-1}"
   export MODE="${MODE:-16S}"
