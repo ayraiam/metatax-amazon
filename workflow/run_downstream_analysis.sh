@@ -28,6 +28,98 @@ ensure_channels() {
   conda config --set channel_priority strict
 }
 
+# ==========================================================
+# Robust R>=4.5 assertion (fixes cat(list) crash)
+# ==========================================================
+assert_r_version() {
+  log "Checking R version inside env..."
+
+  local rv
+  rv="$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo "0.0.0")"
+  log "R version in env: ${rv}"
+
+  if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
+    die "R < 4.5.0 detected in env. Delete env and recreate (see instructions)."
+  fi
+
+  log "R version OK (>= 4.5.0)."
+}
+
+# ==========================================================
+# install build toolchain + system libs needed to compile Bioconductor from source
+# (this is what usually fixes XVector/SparseArray compile failures on HPC)
+# ==========================================================
+install_build_deps_conda() {
+  log "Ensuring build/system dependencies exist in the env (for compiling Bioconductor packages from source)..."
+
+  local pkgs=(
+    make
+    pkg-config
+    cmake
+    autoconf
+    automake
+    libtool
+    gcc
+    gxx
+    gfortran
+    llvm-openmp
+
+    # common headers/libs used by R/Bioc packages
+    zlib
+    bzip2
+    xz
+    libcurl
+    openssl
+    libxml2
+    pcre2
+    icu
+    readline
+  )
+
+  if command -v mamba >/dev/null 2>&1; then
+    log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    mamba install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  else
+    log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    conda install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  fi
+
+  log "Build/system deps installed."
+}
+
+# ==========================================================
+# install heavy CRAN deps via conda to avoid compilation failures (nloptr/lme4/CVXR etc)
+# ==========================================================
+install_ancombc_cran_deps_conda() {
+  log "Installing ANCOMBC CRAN dependencies via conda (reduces compilation problems)..."
+
+  local pkgs=(
+    r-cvxr
+    r-desctools
+    r-hmisc
+    r-rdpack
+    r-doparallel
+    r-dorng
+    r-energy
+    r-foreach
+    r-gtools
+    r-lme4
+    r-lmertest
+    r-multcomp
+    r-nloptr
+  )
+
+  if command -v mamba >/dev/null 2>&1; then
+    log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    mamba install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  else
+    log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    conda install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  fi
+
+  log "CRAN deps (conda) installed."
+}
+
 create_env() {
   if ! command -v conda >/dev/null 2>&1; then
     die "conda not found. Install Miniforge/Conda first."
@@ -66,28 +158,51 @@ create_env() {
   command -v Rscript >/dev/null 2>&1 || die "Rscript not available in env."
   log "Env ready: $(which Rscript)"
 
-  ### hard fail if R < 4.5 (prevents silent downgrade surprises)
-  Rscript -e 'v <- getRversion(); cat(">>> R version in env: ", v, "\n", sep=""); quit(status=ifelse(v < "4.5.0", 1, 0))' \
-    || die "R < 4.5.0 detected in env. Delete env and recreate (see instructions)."
-}
+  assert_r_version
 
+  # ==========================================================
+  # Ensure toolchain exists BEFORE BiocManager tries compiling stuff like XVector
+  # ==========================================================
+  install_build_deps_conda
+}
 # ----------------------------------------------------------
 # Install Bioconductor deps via BiocManager (inside R)
 # ----------------------------------------------------------
 install_bioc_deps_r() {
   log "Installing required Bioconductor dependencies via BiocManager (R-side, matches your R=4.5.*)..."
 
+  # ==========================================================
+  # - force BiocManager to use Bioconductor matching current R
+  # - set compilation flags sanely for conda toolchain
+  # - print a lot more info so we see the REAL XVector compile error next time
+  # ==========================================================
   Rscript -e '
+    options(Ncpus = 1)  # HPC-safe; avoids weird parallel compile issues
+    Sys.setenv(
+      PKG_CONFIG_PATH = Sys.getenv("PKG_CONFIG_PATH"),
+      MAKEFLAGS = "-j1"
+    )
+
     if (!requireNamespace("BiocManager", quietly=TRUE)) {
       install.packages("BiocManager", repos="https://cloud.r-project.org")
     }
+
+    cat(">>> R: ", as.character(getRversion()), "\n", sep="")
     cat(">>> Bioconductor version: ", as.character(BiocManager::version()), "\n", sep="")
+    cat(">>> .libPaths():\n"); print(.libPaths())
+
     pkgs <- c(
+      "XVector",
       "SummarizedExperiment","GenomicRanges","DelayedArray","SparseArray",
-      "DelayedMatrixStats","Biostrings","IRanges","S4Vectors","XVector",
+      "DelayedMatrixStats","Biostrings","IRanges","S4Vectors",
       "GenomeInfoDb","GenomeInfoDbData"
     )
-    BiocManager::install(pkgs, update=FALSE, ask=FALSE)
+
+    # install XVector first so if it fails we know immediately
+    BiocManager::install("XVector", update=FALSE, ask=FALSE)
+
+    # then the rest
+    BiocManager::install(setdiff(pkgs, "XVector"), update=FALSE, ask=FALSE)
   '
   log "Bioconductor dependency install completed (R-side)."
 }
@@ -142,10 +257,13 @@ ensure_ancombc() {
     return 0
   fi
 
-  ### install deps via BiocManager (NOT conda) to avoid r-base<4.5 solver conflicts
+  # ==========================================================
+  # 1) install heavy CRAN deps via conda first (avoids compilation failures)
+  # 2) install Bioconductor deps via BiocManager
+  # ==========================================================
+  install_ancombc_cran_deps_conda
   install_bioc_deps_r
 
-  ### install from GitHub (keep dependencies=FALSE since we installed deps above)
   log "Installing ANCOMBC from GitHub (dependencies=FALSE): FrederickHuangLin/ANCOMBC"
   Rscript -e 'remotes::install_github("FrederickHuangLin/ANCOMBC", upgrade="never", dependencies=FALSE)'
 
