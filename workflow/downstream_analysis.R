@@ -561,7 +561,7 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
 }
 
 # ==========================================================
-# STEP 7: Differential taxa (ANCOM-BC2) - ROBUST META FIX
+# STEP 7: Differential taxa (ANCOM-BC2)
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
@@ -574,7 +574,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   } else if (requireNamespace("ancombc", quietly = TRUE)) {
     pkg <- "ancombc"
   } else {
-    stop("Missing R package 'ANCOMBC' (ANCOM-BC2). Your bash wrapper should install it.")
+    stop("Missing R package 'ANCOMBC' (ANCOM-BC2).")
   }
   message(">>> Using ANCOM-BC2 package namespace: ", pkg)
   
@@ -590,6 +590,18 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   # wide sample x genus
   wide <- dcast(gen_long, file + environment ~ genus, value.var = "val", fill = 0)
   
+  # ---------- META (must match samples) ----------
+  meta_df <- as.data.frame(wide[, .(file, environment)])
+  
+  # rename column
+  colnames(meta_df)[colnames(meta_df) == "environment"] <- "env_group"
+  
+  # Set as factor with proper levels
+  meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
+  meta_df$file <- as.character(meta_df$file)
+  rownames(meta_df) <- meta_df$file
+  meta_df$file <- NULL
+  
   # ---------- FEATURE TABLE ----------
   mat <- as.matrix(wide[, setdiff(names(wide), c("file", "environment")), with = FALSE])
   rownames(mat) <- wide$file
@@ -598,23 +610,10 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   data_for_ancom <- t(mat)                     # taxa x samples
   storage.mode(data_for_ancom) <- "numeric"
   
-  # ---------- META (ROBUST; build from gen_long, not wide) ----------
-  meta_df <- unique(gen_long[, .(file, environment)])
-  meta_df <- as.data.frame(meta_df)
-  
-  names(meta_df)[names(meta_df) == "environment"] <- "env_group"
-  
-  meta_df$env_group <- as.character(meta_df$env_group)
-  meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
-  
-  rownames(meta_df) <- meta_df$file
-  meta_df$file <- NULL
-  
   # force exact sample alignment
   common <- intersect(colnames(data_for_ancom), rownames(meta_df))
-  if (length(common) == 0) {
-    stop(">>> Step 7 ERROR: No common samples between data matrix and metadata!")
-  }
+  if (length(common) == 0) stop(">>> Step 7 ERROR: No common samples between data matrix and metadata!")
+  
   data_for_ancom <- data_for_ancom[, common, drop = FALSE]
   meta_df <- meta_df[common, , drop = FALSE]
   
@@ -623,15 +622,28 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   data_for_ancom <- data_for_ancom[, keep, drop = FALSE]
   meta_df <- meta_df[keep, , drop = FALSE]
   
-  # --- DEBUG (print BEFORE calling ANCOMBC, since errors happen inside) ---
-  message(">>> DEBUG: meta_df class = ", paste(class(meta_df), collapse = ","))
-  message(">>> DEBUG: meta_df colnames = ", paste(colnames(meta_df), collapse = ","))
-  message(">>> DEBUG: env_group table:")
-  print(table(meta_df$env_group, useNA = "ifany"))
-  message(">>> DEBUG: first 6 rows of meta_df:")
-  print(utils::head(meta_df))
+  # ==========================================================
+  # HARDEN meta_df to a plain base data.frame
+  # (prevents data.table / drop-to-vector / 0-col weirdness)
+  # ==========================================================
+  meta_df <- data.frame(
+    env_group = meta_df$env_group,
+    row.names = rownames(meta_df),
+    stringsAsFactors = FALSE
+  )
+  meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
   
-  # sanity check prints
+  # enforce exact column name + trim just in case
+  colnames(meta_df) <- trimws(colnames(meta_df))
+  
+  #  sanity checks that fail early with a clear message
+  message(">>> Step 7 DEBUG: meta_df colnames = ", paste(colnames(meta_df), collapse = ","))
+  if (!"env_group" %in% colnames(meta_df)) {
+    stop(">>> Step 7 ERROR: meta_df does not contain 'env_group'. colnames(meta_df) = ",
+         paste(colnames(meta_df), collapse = ","))
+  }
+  
+  # prints
   message(">>> Step 7: data dims (taxa x samples) = ", nrow(data_for_ancom), " x ", ncol(data_for_ancom))
   message(">>> Step 7: meta rows = ", nrow(meta_df), "; meta cols = ", paste(colnames(meta_df), collapse = ","))
   message(">>> Step 7: Sample count = ", ncol(data_for_ancom))
@@ -639,10 +651,14 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   # call ancombc2
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
+  # ==========================================================
+  # pass fix_formula as a formula object
+  # (avoids any string parsing edge cases)
+  # ==========================================================
   res <- ancombc2_fun(
     data = data_for_ancom,
     meta_data = meta_df,
-    fix_formula = "env_group",
+    fix_formula = env_group ~ 1,
     rand_formula = NULL,
     p_adj_method = "BH",
     prv_cut = 0.10,
@@ -656,10 +672,11 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
   # robust coefficient picking
   coef_candidates <- colnames(res$res$lfc)
+  
+  # coefficient name now won’t start with "env_group" if formula is env_group ~ 1
+  # In ANCOMBC2, it is often "env_groupPeneira" (reference Floresta)
   coef_col <- grep("^env_group", coef_candidates, value = TRUE)
-  if (length(coef_col) == 0) {
-    coef_col <- grep("Peneira|Floresta", coef_candidates, value = TRUE)
-  }
+  if (length(coef_col) == 0) coef_col <- grep("Peneira|Floresta", coef_candidates, value = TRUE)
   if (length(coef_col) == 0) {
     message(">>> Step 7: Available coefficient columns: ", paste(coef_candidates, collapse = ", "))
     stop("ANCOM-BC2 output does not contain expected coefficient column.")
@@ -676,7 +693,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     diff_abn = res$res$diff_abn[, coef_col]
   )
   
-  # Interpret LFC direction: positive = higher in Peneira
   out[, lfc_direction := ifelse(lfc > 0, "Higher in Peneira", "Higher in Floresta")]
   setorder(out, q_val, p_val, -abs(lfc), genus)
   
@@ -684,7 +700,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
          file = file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.tsv")),
          sep = "\t")
   
-  # quick plot
   out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
   out[, significance := ifelse(q_val < 0.05, "q < 0.05", "ns")]
   
