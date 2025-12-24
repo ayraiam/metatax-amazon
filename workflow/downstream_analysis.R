@@ -561,7 +561,7 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
 }
 
 # ==========================================================
-# STEP 7: Differential taxa (ANCOM-BC2)
+# STEP 7: Differential taxa (ANCOM-BC2) - ROBUST META FIX
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
@@ -574,7 +574,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   } else if (requireNamespace("ancombc", quietly = TRUE)) {
     pkg <- "ancombc"
   } else {
-    stop("Missing R package 'ANCOMBC' (ANCOM-BC2). Your bash wrapper should install bioconductor-ancombc.")
+    stop("Missing R package 'ANCOMBC' (ANCOM-BC2). Your bash wrapper should install it.")
   }
   message(">>> Using ANCOM-BC2 package namespace: ", pkg)
   
@@ -590,57 +590,80 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   # wide sample x genus
   wide <- dcast(gen_long, file + environment ~ genus, value.var = "val", fill = 0)
   
-  # ---------- META (must match samples) ----------
-  meta_df <- as.data.frame(wide[, .(file, environment)])
-  meta_df$file <- as.character(meta_df$file)
-  meta_df$environment <- trimws(as.character(meta_df$environment))            
-  meta_df$environment <- factor(meta_df$environment, levels = c("Floresta","Peneira"))  
+  # ---------- FEATURE TABLE ----------
+  mat <- as.matrix(wide[, setdiff(names(wide), c("file", "environment")), with = FALSE])
+  rownames(mat) <- wide$file
+  
+  # ANCOM-BC2 expects taxa/features as ROWS and samples as COLUMNS
+  data_for_ancom <- t(mat)                     # taxa x samples
+  storage.mode(data_for_ancom) <- "numeric"
+  
+  # ---------- META (ROBUST; build from gen_long, not wide) ----------
+  meta_df <- unique(gen_long[, .(file, environment)])
+  meta_df <- as.data.frame(meta_df)
+  
+  names(meta_df)[names(meta_df) == "environment"] <- "env_group"
+  
+  meta_df$env_group <- as.character(meta_df$env_group)
+  meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
+  
   rownames(meta_df) <- meta_df$file
   meta_df$file <- NULL
   
-  # ---------- FEATURE TABLE ----------
-  mat <- as.matrix(wide[, setdiff(names(wide), c("file","environment")), with = FALSE])
-  rownames(mat) <- wide$file
-  
-  # ### CHANGED: ANCOM-BC2 expects taxa/features as ROWS and samples as COLUMNS for generic matrices
-  data_for_ancom <- t(mat)                     # taxa x samples
-  storage.mode(data_for_ancom) <- "numeric"    #
-  
-  # ### CHANGED: force exact sample alignment + drop any NA environments
+  # force exact sample alignment
   common <- intersect(colnames(data_for_ancom), rownames(meta_df))
+  if (length(common) == 0) {
+    stop(">>> Step 7 ERROR: No common samples between data matrix and metadata!")
+  }
   data_for_ancom <- data_for_ancom[, common, drop = FALSE]
   meta_df <- meta_df[common, , drop = FALSE]
-  keep <- !is.na(meta_df$environment)
+  
+  # Remove any samples with NA group
+  keep <- !is.na(meta_df$env_group)
   data_for_ancom <- data_for_ancom[, keep, drop = FALSE]
   meta_df <- meta_df[keep, , drop = FALSE]
   
-  # sanity check prints (small, but super useful on HPC logs)
-  message(">>> Step 7: data dims (taxa x samples) = ", nrow(data_for_ancom), " x ", ncol(data_for_ancom))  
-  message(">>> Step 7: meta rows = ", nrow(meta_df), "; meta cols = ", paste(colnames(meta_df), collapse = ",")) 
+  # --- DEBUG (print BEFORE calling ANCOMBC, since errors happen inside) ---
+  message(">>> DEBUG: meta_df class = ", paste(class(meta_df), collapse = ","))
+  message(">>> DEBUG: meta_df colnames = ", paste(colnames(meta_df), collapse = ","))
+  message(">>> DEBUG: env_group table:")
+  print(table(meta_df$env_group, useNA = "ifany"))
+  message(">>> DEBUG: first 6 rows of meta_df:")
+  print(utils::head(meta_df))
+  
+  # sanity check prints
+  message(">>> Step 7: data dims (taxa x samples) = ", nrow(data_for_ancom), " x ", ncol(data_for_ancom))
+  message(">>> Step 7: meta rows = ", nrow(meta_df), "; meta cols = ", paste(colnames(meta_df), collapse = ","))
+  message(">>> Step 7: Sample count = ", ncol(data_for_ancom))
   
   # call ancombc2
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
   res <- ancombc2_fun(
-    data = data_for_ancom,          
+    data = data_for_ancom,
     meta_data = meta_df,
-    fix_formula = "environment",
+    fix_formula = "env_group",
     rand_formula = NULL,
     p_adj_method = "BH",
     prv_cut = 0.10,
     lib_cut = 0,
-    group = "environment",
     struc_zero = TRUE,
     neg_lb = TRUE,
     alpha = 0.05,
     n_cl = 1,
-    verbose = FALSE
+    verbose = TRUE
   )
   
   # robust coefficient picking
   coef_candidates <- colnames(res$res$lfc)
-  coef_col <- grep("^environment", coef_candidates, value = TRUE)
-  if (length(coef_col) == 0) stop("ANCOM-BC2 output does not contain an 'environment*' coefficient column.")
+  coef_col <- grep("^env_group", coef_candidates, value = TRUE)
+  if (length(coef_col) == 0) {
+    coef_col <- grep("Peneira|Floresta", coef_candidates, value = TRUE)
+  }
+  if (length(coef_col) == 0) {
+    message(">>> Step 7: Available coefficient columns: ", paste(coef_candidates, collapse = ", "))
+    stop("ANCOM-BC2 output does not contain expected coefficient column.")
+  }
   coef_col <- coef_col[1]
   
   out <- data.table(
@@ -653,6 +676,8 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     diff_abn = res$res$diff_abn[, coef_col]
   )
   
+  # Interpret LFC direction: positive = higher in Peneira
+  out[, lfc_direction := ifelse(lfc > 0, "Higher in Peneira", "Higher in Floresta")]
   setorder(out, q_val, p_val, -abs(lfc), genus)
   
   fwrite(out,
@@ -661,18 +686,27 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
   # quick plot
   out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
-  p <- ggplot(out, aes(x = lfc, y = neglog10_q)) +
+  out[, significance := ifelse(q_val < 0.05, "q < 0.05", "ns")]
+  
+  p <- ggplot(out, aes(x = lfc, y = neglog10_q, color = significance)) +
     geom_point(alpha = 0.6, size = 1.2) +
     geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.6) +
+    geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.4) +
+    scale_color_manual(values = c("q < 0.05" = "red", "ns" = "grey60")) +
     labs(
       x = "Log fold-change (Peneira vs Floresta)",
       y = "-log10(q-value)",
-      title = "ANCOM-BC2 (genus): Peneira vs Floresta"
+      title = "ANCOM-BC2 (genus): Peneira vs Floresta",
+      color = "Significance"
     ) +
-    theme_classic(base_size = 12)
+    theme_classic(base_size = 12) +
+    theme(legend.position = "bottom")
   
   ggsave(file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.png")),
-         p, width = 5.5, height = 4.2, dpi = 300)
+         p, width = 6, height = 5, dpi = 300)
+  
+  message(">>> Step 7: ANCOM-BC2 completed successfully. Found ",
+          sum(out$q_val < 0.05, na.rm = TRUE), " significant genera at q < 0.05.")
 }
 
 # ==========================================================
