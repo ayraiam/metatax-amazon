@@ -78,10 +78,10 @@ install_build_deps_conda() {
 
   if command -v mamba >/dev/null 2>&1; then
     log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    mamba install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
   else
     log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    conda install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
   fi
 
   log "Build/system deps installed."
@@ -111,10 +111,10 @@ install_ancombc_cran_deps_conda() {
 
   if command -v mamba >/dev/null 2>&1; then
     log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    mamba install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
   else
     log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    conda install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
   fi
 
   log "CRAN deps (conda) installed."
