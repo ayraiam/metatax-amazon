@@ -5,6 +5,10 @@
 #   - Create/activate a clean env for downstream analysis
 #   - Ensure ANCOMBC (for ANCOM-BC2) is available (GitHub preferred)
 #   - Run downstream_analysis.R
+#
+# Key fixes for your cases:
+#   (2) Prevent solver downgrading R after creation (hard re-pin r-base=4.5.*)
+#   (3) Detect/stop if PATH is not using env's Rscript (prove which R is used)
 # ==========================================================
 set -euo pipefail
 
@@ -29,50 +33,71 @@ ensure_channels() {
 }
 
 # ==========================================================
-# Helper: run mamba/conda consistently
+# Robust R>=4.5 assertion + PATH correctness verification
 # ==========================================================
-conda_install() {
-  # usage: conda_install <pkgs...>
-  if command -v mamba >/dev/null 2>&1; then
-    log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda $*"
-    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda "$@" -y
-  else
-    log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda $*"
-    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda "$@" -y
+assert_r_version_and_path() {
+  log "Checking R version + making sure we're using the ENV's Rscript..."
+
+  # ---------- compute expected env Rscript path ----------
+  local expected_rscript
+  expected_rscript="$(conda info --base)/envs/${ENV_NAME}/bin/Rscript"
+  # If conda uses a different envs_dir layout, derive from CONDA_PREFIX
+  if [[ -n "${CONDA_PREFIX:-}" ]]; then
+    expected_rscript="${CONDA_PREFIX}/bin/Rscript"
   fi
+  log "Expected env Rscript: ${expected_rscript}"
+
+  # ---------- check which Rscript we are actually using ----------
+  local actual_rscript
+  actual_rscript="$(command -v Rscript || true)"
+  log "Actual   Rscript on PATH: ${actual_rscript}"
+
+  if [[ -z "${actual_rscript}" ]]; then
+    die "Rscript not found on PATH after activation."
+  fi
+
+  # ---------- hard fail if PATH is not pointing at env Rscript (case 3) ----------
+  if [[ "${actual_rscript}" != "${expected_rscript}" ]]; then
+    log "DEBUG: CONDA_PREFIX=${CONDA_PREFIX:-<unset>}"
+    log "DEBUG: PATH=${PATH}"
+    die "You are NOT using the env's Rscript (PATH/module issue). Fix your module environment or ensure conda activate works inside the batch job."
+  fi
+
+  # ---------- read version in a safe scalar way ----------
+  local rv
+  rv="$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo "0.0.0")"
+  log "R version in env: ${rv}"
+
+  # Hard fail if <4.5
+  if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
+    die "R < 4.5.0 detected in env. Something downgraded R or activation is not real."
+  fi
+
+  # ---------- show conda's r-base record for extra proof ----------
+  log "Conda r-base entry:"
+  conda list -n "${ENV_NAME}" | awk 'BEGIN{found=0} $1=="r-base"{print; found=1} END{if(!found) print "r-base not found in conda list"}' >&2
+
+  log "R version OK (>= 4.5.0) and PATH is correct."
 }
 
 # ==========================================================
-# Robust R>=4.5 assertion + auto-fix (prevents silent R=4.4.3)
+# hard pin R 4.5.* AFTER ANY conda/mamba install (case 2)
+# This prevents libmamba from silently downgrading R to solve Bioconductor specs.
 # ==========================================================
-assert_and_fix_r_version() {
-  log "Checking R version inside env..."
+repin_r_base() {
+  log "Re-pinning r-base to 4.5.* to prevent solver downgrades..."
 
-  # print which Rscript is being used
-  log "Rscript path: $(command -v Rscript || echo 'NOT_FOUND')"
-
-  local rv
-  rv="$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo "0.0.0")"
-  log "R version in env (via Rscript): ${rv}"
-
-  # also print R.home() to confirm it’s from the env
-  Rscript -e 'cat("R.home(): ", R.home(), "\n", sep="")' || true
-
-  # If R < 4.5, force-upgrade r-base inside the env (don’t just die)
-  if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
-    log "R < 4.5.0 detected. Forcing r-base=4.5.* upgrade inside env..."
-    conda_install "r-base=4.5.*"
-
-    # re-check after upgrade
-    rv="$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo "0.0.0")"
-    log "R version after forced install: ${rv}"
-
-    if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
-      die "Still R < 4.5.0 after forced r-base=4.5.* install. Something is pinning/downgrading the env."
-    fi
+  # Use --update-specs so the solver prefers keeping pinned specs
+  if command -v mamba >/dev/null 2>&1; then
+    log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda 'r-base=4.5.*' --update-specs"
+    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda "r-base=4.5.*" --update-specs -y
+  else
+    log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda 'r-base=4.5.*' --update-specs"
+    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda "r-base=4.5.*" --update-specs -y
   fi
 
-  log "R version OK (>= 4.5.0)."
+  # Verify immediately
+  assert_r_version_and_path
 }
 
 # ==========================================================
@@ -82,15 +107,40 @@ install_build_deps_conda() {
   log "Ensuring build/system dependencies exist in the env (for compiling Bioconductor packages from source)..."
 
   local pkgs=(
-    make pkg-config cmake autoconf automake libtool
-    gcc gxx gfortran llvm-openmp
-    zlib bzip2 xz libcurl openssl libxml2 pcre2 icu readline
+    make
+    pkg-config
+    cmake
+    autoconf
+    automake
+    libtool
+    gcc
+    gxx
+    gfortran
+    llvm-openmp
+
+    zlib
+    bzip2
+    xz
+    libcurl
+    openssl
+    libxml2
+    pcre2
+    icu
+    readline
   )
 
-  # don’t randomly install phyloseq here (unrelated + can affect solver)
-  conda_install "${pkgs[@]}"
+  if command -v mamba >/dev/null 2>&1; then
+    log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    mamba install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  else
+    log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    conda install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  fi
 
   log "Build/system deps installed."
+
+  # ---------- re-pin R after installs (case 2) ----------
+  repin_r_base
 }
 
 # ==========================================================
@@ -100,14 +150,33 @@ install_ancombc_cran_deps_conda() {
   log "Installing ANCOMBC CRAN dependencies via conda (reduces compilation problems)..."
 
   local pkgs=(
-    r-cvxr r-desctools r-hmisc r-rdpack r-doparallel r-dorng
-    r-energy r-foreach r-gtools r-lme4 r-lmertest r-multcomp r-nloptr
+    r-cvxr
+    r-desctools
+    r-hmisc
+    r-rdpack
+    r-doparallel
+    r-dorng
+    r-energy
+    r-foreach
+    r-gtools
+    r-lme4
+    r-lmertest
+    r-multcomp
+    r-nloptr
   )
 
-  # don’t install phyloseq as a side-effect
-  conda_install "${pkgs[@]}"
+  if command -v mamba >/dev/null 2>&1; then
+    log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    mamba install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  else
+    log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
+    conda install -n "${ENV_NAME}" -c conda-forge "${pkgs[@]}" -y
+  fi
 
   log "CRAN deps (conda) installed."
+
+  # ---------- re-pin R after installs (case 2) ----------
+  repin_r_base
 }
 
 create_env() {
@@ -129,7 +198,8 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager r-remotes \
+        r-biocmanager \
+        r-remotes \
         -y
     else
       conda create -n "${ENV_NAME}" \
@@ -137,7 +207,8 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager r-remotes \
+        r-biocmanager \
+        r-remotes \
         -y
     fi
     conda activate "${ENV_NAME}"
@@ -146,19 +217,14 @@ create_env() {
   command -v Rscript >/dev/null 2>&1 || die "Rscript not available in env."
   log "Env ready: $(which Rscript)"
 
-  # auto-fix, not just assert
-  assert_and_fix_r_version
+  # ---------- verify PATH + R version immediately (case 3) ----------
+  assert_r_version_and_path
+
+  # ---------- enforce r-base pin even right after creation (case 2) ----------
+  repin_r_base
 
   # Ensure toolchain exists BEFORE BiocManager tries compiling stuff like XVector
   install_build_deps_conda
-
-  install_phyloseq_conda
-}
-
-install_phyloseq_conda() {
-  log "Installing phyloseq via conda (bioconductor-phyloseq)..."
-  conda_install "bioconductor-phyloseq"
-  log "phyloseq installed."
 }
 
 # ----------------------------------------------------------
@@ -166,6 +232,9 @@ install_phyloseq_conda() {
 # ----------------------------------------------------------
 install_bioc_deps_r() {
   log "Installing required Bioconductor dependencies via BiocManager (R-side, matches your R=4.5.*)..."
+
+  # ---------- re-check PATH+R before Bioc install ----------
+  assert_r_version_and_path
 
   Rscript -e '
     options(Ncpus = 1)
@@ -190,6 +259,9 @@ install_bioc_deps_r() {
     BiocManager::install(setdiff(pkgs, "XVector"), update=FALSE, ask=FALSE)
   '
   log "Bioconductor dependency install completed (R-side)."
+
+  # ---------- after Bioc install, confirm R didn't get swapped (case 3) ----------
+  assert_r_version_and_path
 }
 
 # ----------------------------------------------------------
@@ -198,7 +270,11 @@ install_bioc_deps_r() {
 ensure_ancombc() {
   log "Checking for R package 'ANCOMBC' (ANCOM-BC2)..."
 
+  # ---------- assert correct R before doing anything ----------
+  assert_r_version_and_path
+
   classify="UNKNOWN"
+
   classify="$(
     Rscript -e '
       out <- "UNKNOWN"
@@ -233,13 +309,19 @@ ensure_ancombc() {
     log "ANCOMBC removed."
   elif [[ "${classify}" == "NOT_INSTALLED" ]]; then
     log "ANCOMBC not installed."
+  elif [[ "${classify}" == "OTHER" ]]; then
+    log "ANCOMBC installed but origin is OTHER/unknown. Per your rule: only replace if Bioconductor. Keeping it."
+    return 0
   else
-    log "ANCOMBC classification ${classify}. Per your rule: only replace if Bioconductor/Not installed. Keeping it."
+    log "ANCOMBC classification UNKNOWN. Per your rule: only replace if Bioconductor. Keeping it."
     return 0
   fi
 
   install_ancombc_cran_deps_conda
   install_bioc_deps_r
+
+  # ---------- assert AGAIN right before GitHub install (case 3) ----------
+  assert_r_version_and_path
 
   log "Installing ANCOMBC from GitHub (dependencies=FALSE, build=FALSE)..."
   Rscript -e 'remotes::install_github(
@@ -272,6 +354,9 @@ run_downstream() {
   log "  MODE          = $MODE"
   log "  USE_COUNTS_0_4= $USE_COUNTS_0_4"
   log "  USE_COUNTS_5  = $USE_COUNTS_5"
+
+  # ---------- assert correct R right before running analysis (case 3) ----------
+  assert_r_version_and_path
 
   Rscript workflow/downstream_analysis.R \
     "$INFILE" \
