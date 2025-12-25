@@ -29,17 +29,47 @@ ensure_channels() {
 }
 
 # ==========================================================
-# Robust R>=4.5 assertion (fixes cat(list) crash)
+# Helper: run mamba/conda consistently
 # ==========================================================
-assert_r_version() {
+conda_install() {
+  # usage: conda_install <pkgs...>
+  if command -v mamba >/dev/null 2>&1; then
+    log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda $*"
+    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda "$@" -y
+  else
+    log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda $*"
+    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda "$@" -y
+  fi
+}
+
+# ==========================================================
+# Robust R>=4.5 assertion + auto-fix (prevents silent R=4.4.3)
+# ==========================================================
+assert_and_fix_r_version() {
   log "Checking R version inside env..."
+
+  # print which Rscript is being used
+  log "Rscript path: $(command -v Rscript || echo 'NOT_FOUND')"
 
   local rv
   rv="$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo "0.0.0")"
-  log "R version in env: ${rv}"
+  log "R version in env (via Rscript): ${rv}"
 
+  # also print R.home() to confirm it’s from the env
+  Rscript -e 'cat("R.home(): ", R.home(), "\n", sep="")' || true
+
+  # If R < 4.5, force-upgrade r-base inside the env (don’t just die)
   if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
-    die "R < 4.5.0 detected in env. Delete env and recreate (see instructions)."
+    log "R < 4.5.0 detected. Forcing r-base=4.5.* upgrade inside env..."
+    conda_install "r-base=4.5.*"
+
+    # re-check after upgrade
+    rv="$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo "0.0.0")"
+    log "R version after forced install: ${rv}"
+
+    if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
+      die "Still R < 4.5.0 after forced r-base=4.5.* install. Something is pinning/downgrading the env."
+    fi
   fi
 
   log "R version OK (>= 4.5.0)."
@@ -47,42 +77,18 @@ assert_r_version() {
 
 # ==========================================================
 # install build toolchain + system libs needed to compile Bioconductor from source
-# (this is what usually fixes XVector/SparseArray compile failures on HPC)
 # ==========================================================
 install_build_deps_conda() {
   log "Ensuring build/system dependencies exist in the env (for compiling Bioconductor packages from source)..."
 
   local pkgs=(
-    make
-    pkg-config
-    cmake
-    autoconf
-    automake
-    libtool
-    gcc
-    gxx
-    gfortran
-    llvm-openmp
-
-    # common headers/libs used by R/Bioc packages
-    zlib
-    bzip2
-    xz
-    libcurl
-    openssl
-    libxml2
-    pcre2
-    icu
-    readline
+    make pkg-config cmake autoconf automake libtool
+    gcc gxx gfortran llvm-openmp
+    zlib bzip2 xz libcurl openssl libxml2 pcre2 icu readline
   )
 
-  if command -v mamba >/dev/null 2>&1; then
-    log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
-  else
-    log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
-  fi
+  # don’t randomly install phyloseq here (unrelated + can affect solver)
+  conda_install "${pkgs[@]}"
 
   log "Build/system deps installed."
 }
@@ -94,28 +100,12 @@ install_ancombc_cran_deps_conda() {
   log "Installing ANCOMBC CRAN dependencies via conda (reduces compilation problems)..."
 
   local pkgs=(
-    r-cvxr
-    r-desctools
-    r-hmisc
-    r-rdpack
-    r-doparallel
-    r-dorng
-    r-energy
-    r-foreach
-    r-gtools
-    r-lme4
-    r-lmertest
-    r-multcomp
-    r-nloptr
+    r-cvxr r-desctools r-hmisc r-rdpack r-doparallel r-dorng
+    r-energy r-foreach r-gtools r-lme4 r-lmertest r-multcomp r-nloptr
   )
 
-  if command -v mamba >/dev/null 2>&1; then
-    log "mamba install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
-  else
-    log "conda install -n ${ENV_NAME} -c conda-forge ${pkgs[*]}"
-    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq "${pkgs[@]}" -y
-  fi
+  # don’t install phyloseq as a side-effect
+  conda_install "${pkgs[@]}"
 
   log "CRAN deps (conda) installed."
 }
@@ -139,8 +129,7 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager \
-        r-remotes \
+        r-biocmanager r-remotes \
         -y
     else
       conda create -n "${ENV_NAME}" \
@@ -148,8 +137,7 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager \
-        r-remotes \
+        r-biocmanager r-remotes \
         -y
     fi
     conda activate "${ENV_NAME}"
@@ -158,30 +146,30 @@ create_env() {
   command -v Rscript >/dev/null 2>&1 || die "Rscript not available in env."
   log "Env ready: $(which Rscript)"
 
-  assert_r_version
+  # auto-fix, not just assert
+  assert_and_fix_r_version
 
-  # ==========================================================
   # Ensure toolchain exists BEFORE BiocManager tries compiling stuff like XVector
-  # ==========================================================
   install_build_deps_conda
+
+  install_phyloseq_conda
 }
+
+install_phyloseq_conda() {
+  log "Installing phyloseq via conda (bioconductor-phyloseq)..."
+  conda_install "bioconductor-phyloseq"
+  log "phyloseq installed."
+}
+
 # ----------------------------------------------------------
 # Install Bioconductor deps via BiocManager (inside R)
 # ----------------------------------------------------------
 install_bioc_deps_r() {
   log "Installing required Bioconductor dependencies via BiocManager (R-side, matches your R=4.5.*)..."
 
-  # ==========================================================
-  # - force BiocManager to use Bioconductor matching current R
-  # - set compilation flags sanely for conda toolchain
-  # - print a lot more info so we see the REAL XVector compile error next time
-  # ==========================================================
   Rscript -e '
-    options(Ncpus = 1)  # HPC-safe; avoids weird parallel compile issues
-    Sys.setenv(
-      PKG_CONFIG_PATH = Sys.getenv("PKG_CONFIG_PATH"),
-      MAKEFLAGS = "-j1"
-    )
+    options(Ncpus = 1)
+    Sys.setenv(MAKEFLAGS = "-j1")
 
     if (!requireNamespace("BiocManager", quietly=TRUE)) {
       install.packages("BiocManager", repos="https://cloud.r-project.org")
@@ -198,10 +186,7 @@ install_bioc_deps_r() {
       "GenomeInfoDb","GenomeInfoDbData"
     )
 
-    # install XVector first so if it fails we know immediately
     BiocManager::install("XVector", update=FALSE, ask=FALSE)
-
-    # then the rest
     BiocManager::install(setdiff(pkgs, "XVector"), update=FALSE, ask=FALSE)
   '
   log "Bioconductor dependency install completed (R-side)."
@@ -214,7 +199,6 @@ ensure_ancombc() {
   log "Checking for R package 'ANCOMBC' (ANCOM-BC2)..."
 
   classify="UNKNOWN"
-
   classify="$(
     Rscript -e '
       out <- "UNKNOWN"
@@ -249,30 +233,22 @@ ensure_ancombc() {
     log "ANCOMBC removed."
   elif [[ "${classify}" == "NOT_INSTALLED" ]]; then
     log "ANCOMBC not installed."
-  elif [[ "${classify}" == "OTHER" ]]; then
-    log "ANCOMBC installed but origin is OTHER/unknown. Per your rule: only replace if Bioconductor. Keeping it."
-    return 0
   else
-    log "ANCOMBC classification UNKNOWN. Per your rule: only replace if Bioconductor. Keeping it."
+    log "ANCOMBC classification ${classify}. Per your rule: only replace if Bioconductor/Not installed. Keeping it."
     return 0
   fi
 
-  # ==========================================================
-  # 1) install heavy CRAN deps via conda first (avoids compilation failures)
-  # 2) install Bioconductor deps via BiocManager
-  # ==========================================================
   install_ancombc_cran_deps_conda
   install_bioc_deps_r
 
-  log "Installing ANCOMBC from GitHub (dependencies=FALSE): FrederickHuangLin/ANCOMBC"
+  log "Installing ANCOMBC from GitHub (dependencies=FALSE, build=FALSE)..."
   Rscript -e 'remotes::install_github(
-  "FrederickHuangLin/ANCOMBC",
-  upgrade = "never",
-  dependencies = FALSE,
-  build = FALSE,
-  build_vignettes = FALSE
-)
-'
+    "FrederickHuangLin/ANCOMBC",
+    upgrade = "never",
+    dependencies = FALSE,
+    build = FALSE,
+    build_vignettes = FALSE
+  )'
 
   log "Verifying ANCOMBC after GitHub install..."
   if ! Rscript -e 'quit(status = ifelse(requireNamespace("ANCOMBC", quietly=TRUE), 0, 1))'; then
