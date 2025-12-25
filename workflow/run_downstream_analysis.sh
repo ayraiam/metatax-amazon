@@ -5,10 +5,6 @@
 #   - Create/activate a clean env for downstream analysis
 #   - Ensure ANCOMBC (for ANCOM-BC2) is available (GitHub preferred)
 #   - Run downstream_analysis.R
-#
-# Key fixes for your cases:
-#   (2) Prevent solver downgrading R after creation (hard re-pin r-base=4.5.*)
-#   (3) Detect/stop if PATH is not using env's Rscript (prove which R is used)
 # ==========================================================
 set -euo pipefail
 
@@ -56,7 +52,7 @@ assert_r_version_and_path() {
   if [[ "${actual_rscript}" != "${expected_rscript}" ]]; then
     log "DEBUG: CONDA_PREFIX=${CONDA_PREFIX:-<unset>}"
     log "DEBUG: PATH=${PATH}"
-    die "You are NOT using the env's Rscript (PATH/module issue). Fix your module environment or ensure conda activate works inside the batch job."
+    die "You are NOT using the env's Rscript (PATH/module issue)."
   fi
 
   local rv
@@ -64,7 +60,7 @@ assert_r_version_and_path() {
   log "R version in env: ${rv}"
 
   if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
-    die "R < 4.5.0 detected in env. Something downgraded R or activation is not real."
+    die "R < 4.5.0 detected in env."
   fi
 
   log "Conda r-base entry:"
@@ -80,11 +76,9 @@ repin_r_base() {
   log "Re-pinning r-base to 4.5.* to prevent solver downgrades..."
 
   if command -v mamba >/dev/null 2>&1; then
-    # mamba may NOT support --update-specs. Use plain install.
     log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda 'r-base=4.5.*'"
     mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda "r-base=4.5.*" -y
   else
-    # conda DOES support --update-specs; keep it here
     log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda 'r-base=4.5.*' --update-specs"
     conda install -n "${ENV_NAME}" -c conda-forge -c bioconda "r-base=4.5.*" --update-specs -y
   fi
@@ -99,25 +93,9 @@ install_build_deps_conda() {
   log "Ensuring build/system dependencies exist in the env (for compiling Bioconductor packages from source)..."
 
   local pkgs=(
-    make
-    pkg-config
-    cmake
-    autoconf
-    automake
-    libtool
-    gcc
-    gxx
-    gfortran
-    llvm-openmp
-    zlib
-    bzip2
-    xz
-    libcurl
-    openssl
-    libxml2
-    pcre2
-    icu
-    readline
+    make pkg-config cmake autoconf automake libtool
+    gcc gxx gfortran llvm-openmp
+    zlib bzip2 xz libcurl openssl libxml2 pcre2 icu readline
   )
 
   if command -v mamba >/dev/null 2>&1; then
@@ -139,19 +117,8 @@ install_ancombc_cran_deps_conda() {
   log "Installing ANCOMBC CRAN dependencies via conda (reduces compilation problems)..."
 
   local pkgs=(
-    r-cvxr
-    r-desctools
-    r-hmisc
-    r-rdpack
-    r-doparallel
-    r-dorng
-    r-energy
-    r-foreach
-    r-gtools
-    r-lme4
-    r-lmertest
-    r-multcomp
-    r-nloptr
+    r-cvxr r-desctools r-hmisc r-rdpack r-doparallel r-dorng r-energy
+    r-foreach r-gtools r-lme4 r-lmertest r-multcomp r-nloptr
   )
 
   if command -v mamba >/dev/null 2>&1; then
@@ -164,6 +131,31 @@ install_ancombc_cran_deps_conda() {
 
   log "CRAN deps (conda) installed."
   repin_r_base
+}
+
+# ==========================================================
+# Ensure phyloseq exists (ANCOMBC/ANCOMBC2 dependency on many installs)
+# Install via conda to avoid source compilation surprises.
+# ==========================================================
+install_phyloseq_conda() {
+  log "Ensuring 'phyloseq' is installed (required by ANCOMBC/ANCOMBC2)..."
+
+  if command -v mamba >/dev/null 2>&1; then
+    log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda bioconductor-phyloseq"
+    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq -y
+  else
+    log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda bioconductor-phyloseq"
+    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq -y
+  fi
+
+  # re-pin after installing any Bioconductor stack via conda
+  repin_r_base
+
+  # sanity check in R
+  Rscript -e 'quit(status=ifelse(requireNamespace("phyloseq", quietly=TRUE), 0, 1))' \
+    || die "phyloseq installation failed (package still not loadable)."
+
+  log "phyloseq is installed."
 }
 
 create_env() {
@@ -185,8 +177,7 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager \
-        r-remotes \
+        r-biocmanager r-remotes \
         -y
     else
       conda create -n "${ENV_NAME}" \
@@ -194,8 +185,7 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager \
-        r-remotes \
+        r-biocmanager r-remotes \
         -y
     fi
     conda activate "${ENV_NAME}"
@@ -207,6 +197,11 @@ create_env() {
   assert_r_version_and_path
   repin_r_base
   install_build_deps_conda
+
+  # ==========================================================
+  # Install phyloseq early (before ANCOMBC install & before downstream run)
+  # ==========================================================
+  install_phyloseq_conda
 }
 
 # ----------------------------------------------------------
@@ -226,7 +221,6 @@ install_bioc_deps_r() {
 
     cat(">>> R: ", as.character(getRversion()), "\n", sep="")
     cat(">>> Bioconductor version: ", as.character(BiocManager::version()), "\n", sep="")
-    cat(">>> .libPaths():\n"); print(.libPaths())
 
     pkgs <- c(
       "XVector",
