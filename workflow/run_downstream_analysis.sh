@@ -4,6 +4,7 @@
 # Purpose:
 #   - Create/activate a clean env for downstream analysis
 #   - Ensure ANCOMBC (for ANCOM-BC2) is available (GitHub preferred)
+#   - Ensure phyloseq is available (WITHOUT conda downgrading R)
 #   - Run downstream_analysis.R
 # ==========================================================
 set -euo pipefail
@@ -29,73 +30,66 @@ ensure_channels() {
 }
 
 # ==========================================================
-# Robust R>=4.5 assertion + PATH correctness verification
+# Strong check: confirm we're using ENV Rscript + R>=4.5
 # ==========================================================
 assert_r_version_and_path() {
   log "Checking R version + making sure we're using the ENV's Rscript..."
 
-  local expected_rscript
-  expected_rscript="$(conda info --base)/envs/${ENV_NAME}/bin/Rscript"
-  if [[ -n "${CONDA_PREFIX:-}" ]]; then
-    expected_rscript="${CONDA_PREFIX}/bin/Rscript"
-  fi
-  log "Expected env Rscript: ${expected_rscript}"
+  local expected actual rv
+  expected="$(conda info --base)/envs/${ENV_NAME}/bin/Rscript"
+  actual="$(command -v Rscript || true)"
 
-  local actual_rscript
-  actual_rscript="$(command -v Rscript || true)"
-  log "Actual   Rscript on PATH: ${actual_rscript}"
+  log "Expected env Rscript: ${expected}"
+  log "Actual   Rscript on PATH: ${actual}"
 
-  if [[ -z "${actual_rscript}" ]]; then
-    die "Rscript not found on PATH after activation."
+  if [[ -z "${actual}" ]] || [[ "${actual}" != "${expected}" ]]; then
+    die "Rscript on PATH is not the env Rscript. Something is wrong with conda activation."
   fi
 
-  if [[ "${actual_rscript}" != "${expected_rscript}" ]]; then
-    log "DEBUG: CONDA_PREFIX=${CONDA_PREFIX:-<unset>}"
-    log "DEBUG: PATH=${PATH}"
-    die "You are NOT using the env's Rscript (PATH/module issue)."
-  fi
-
-  local rv
   rv="$(Rscript -e 'cat(as.character(getRversion()))' 2>/dev/null || echo "0.0.0")"
   log "R version in env: ${rv}"
 
-  if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
-    die "R < 4.5.0 detected in env."
-  fi
-
   log "Conda r-base entry:"
-  conda list -n "${ENV_NAME}" | awk 'BEGIN{found=0} $1=="r-base"{print; found=1} END{if(!found) print "r-base not found in conda list"}' >&2
+  (conda list -n "${ENV_NAME}" r-base || true) >&2
+
+  if ! Rscript -e 'quit(status=ifelse(getRversion() >= "4.5.0", 0, 1))'; then
+    die "R < 4.5.0 detected in env. Delete env and recreate."
+  fi
 
   log "R version OK (>= 4.5.0) and PATH is correct."
 }
 
 # ==========================================================
-# Hard pin R 4.5.* AFTER ANY install (prevents silent downgrade)
-# ==========================================================
-repin_r_base() {
-  log "Re-pinning r-base to 4.5.* to prevent solver downgrades..."
-
-  if command -v mamba >/dev/null 2>&1; then
-    log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda 'r-base=4.5.*'"
-    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda "r-base=4.5.*" -y
-  else
-    log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda 'r-base=4.5.*' --update-specs"
-    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda "r-base=4.5.*" --update-specs -y
-  fi
-
-  assert_r_version_and_path
-}
-
-# ==========================================================
-# install build toolchain + system libs needed to compile Bioconductor from source
+# Install toolchain + system libs in env
+# Key addition: hdf5 (needed for rhdf5/biomformat/phyloseq on many HPCs)
 # ==========================================================
 install_build_deps_conda() {
-  log "Ensuring build/system dependencies exist in the env (for compiling Bioconductor packages from source)..."
+  log "Ensuring build/system dependencies exist in the env (for compiling/loading Bioconductor packages)..."
 
   local pkgs=(
-    make pkg-config cmake autoconf automake libtool
-    gcc gxx gfortran llvm-openmp
-    zlib bzip2 xz libcurl openssl libxml2 pcre2 icu readline
+    make
+    pkg-config
+    cmake
+    autoconf
+    automake
+    libtool
+    gcc
+    gxx
+    gfortran
+
+    # common headers/libs used by R/Bioc packages
+    zlib
+    bzip2
+    xz
+    libcurl
+    openssl
+    libxml2
+    pcre2
+    icu
+    readline
+
+    # HDF5 is the usual culprit for phyloseq->biomformat->rhdf5 load failures
+    hdf5
   )
 
   if command -v mamba >/dev/null 2>&1; then
@@ -107,7 +101,6 @@ install_build_deps_conda() {
   fi
 
   log "Build/system deps installed."
-  repin_r_base
 }
 
 # ==========================================================
@@ -117,8 +110,19 @@ install_ancombc_cran_deps_conda() {
   log "Installing ANCOMBC CRAN dependencies via conda (reduces compilation problems)..."
 
   local pkgs=(
-    r-cvxr r-desctools r-hmisc r-rdpack r-doparallel r-dorng r-energy
-    r-foreach r-gtools r-lme4 r-lmertest r-multcomp r-nloptr
+    r-cvxr
+    r-desctools
+    r-hmisc
+    r-rdpack
+    r-doparallel
+    r-dorng
+    r-energy
+    r-foreach
+    r-gtools
+    r-lme4
+    r-lmertest
+    r-multcomp
+    r-nloptr
   )
 
   if command -v mamba >/dev/null 2>&1; then
@@ -130,32 +134,6 @@ install_ancombc_cran_deps_conda() {
   fi
 
   log "CRAN deps (conda) installed."
-  repin_r_base
-}
-
-# ==========================================================
-# Ensure phyloseq exists (ANCOMBC/ANCOMBC2 dependency on many installs)
-# Install via conda to avoid source compilation surprises.
-# ==========================================================
-install_phyloseq_conda() {
-  log "Ensuring 'phyloseq' is installed (required by ANCOMBC/ANCOMBC2)..."
-
-  if command -v mamba >/dev/null 2>&1; then
-    log "mamba install -n ${ENV_NAME} -c conda-forge -c bioconda bioconductor-phyloseq"
-    mamba install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq -y
-  else
-    log "conda install -n ${ENV_NAME} -c conda-forge -c bioconda bioconductor-phyloseq"
-    conda install -n "${ENV_NAME}" -c conda-forge -c bioconda bioconductor-phyloseq -y
-  fi
-
-  # re-pin after installing any Bioconductor stack via conda
-  repin_r_base
-
-  # sanity check in R
-  Rscript -e 'quit(status=ifelse(requireNamespace("phyloseq", quietly=TRUE), 0, 1))' \
-    || die "phyloseq installation failed (package still not loadable)."
-
-  log "phyloseq is installed."
 }
 
 create_env() {
@@ -177,7 +155,8 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager r-remotes \
+        r-biocmanager \
+        r-remotes \
         -y
     else
       conda create -n "${ENV_NAME}" \
@@ -185,7 +164,8 @@ create_env() {
         "r-base=4.5.*" \
         r-data.table r-ggplot2 r-vegan r-tidyr r-dplyr r-stringr \
         r-cowplot r-rcolorbrewer r-ggbeeswarm \
-        r-biocmanager r-remotes \
+        r-biocmanager \
+        r-remotes \
         -y
     fi
     conda activate "${ENV_NAME}"
@@ -195,20 +175,54 @@ create_env() {
   log "Env ready: $(which Rscript)"
 
   assert_r_version_and_path
-  repin_r_base
-  install_build_deps_conda
 
-  # ==========================================================
-  # Install phyloseq early (before ANCOMBC install & before downstream run)
-  # ==========================================================
-  install_phyloseq_conda
+  install_build_deps_conda
 }
 
 # ----------------------------------------------------------
 # Install Bioconductor deps via BiocManager (inside R)
 # ----------------------------------------------------------
 install_bioc_deps_r() {
-  log "Installing required Bioconductor dependencies via BiocManager (R-side, matches your R=4.5.*)..."
+  log "Installing required Bioconductor dependencies via BiocManager (R-side; matches your R=4.5.*)..."
+
+  #More deterministic compilation + prints useful debug if something fails
+  Rscript -e '
+    options(Ncpus = 1)
+    Sys.setenv(MAKEFLAGS = "-j1")
+
+    if (!requireNamespace("BiocManager", quietly=TRUE)) {
+      install.packages("BiocManager", repos="https://cloud.r-project.org")
+    }
+
+    cat(">>> R: ", as.character(getRversion()), "\n", sep="")
+    cat(">>> Bioconductor: ", as.character(BiocManager::version()), "\n", sep="")
+    cat(">>> .libPaths():\n"); print(.libPaths())
+
+    pkgs <- c(
+      "XVector",
+      "IRanges","S4Vectors",
+      "GenomeInfoDb","GenomeInfoDbData",
+      "GenomicRanges",
+      "SparseArray",
+      "DelayedArray",
+      "SummarizedExperiment",
+      "DelayedMatrixStats",
+      "Biostrings"
+    )
+
+    BiocManager::install(pkgs, update=FALSE, ask=FALSE)
+  ' || die "Bioconductor dependency install failed."
+
+  log "Bioconductor dependency install completed (R-side)."
+}
+
+# ==========================================================
+# Install phyloseq via BiocManager + enforce loadability
+# This avoids conda solver downgrading R AND captures the real load error.
+# Key deps included: rhdf5lib/rhdf5/biomformat (common failure point).
+# ==========================================================
+install_phyloseq_r() {
+  log "Ensuring 'phyloseq' is installed and loadable (BiocManager; no conda bioconductor-phyloseq)..."
   assert_r_version_and_path
 
   Rscript -e '
@@ -219,21 +233,32 @@ install_bioc_deps_r() {
       install.packages("BiocManager", repos="https://cloud.r-project.org")
     }
 
-    cat(">>> R: ", as.character(getRversion()), "\n", sep="")
-    cat(">>> Bioconductor version: ", as.character(BiocManager::version()), "\n", sep="")
+    cat(">>> Installing phyloseq dependency chain via Bioconductor...\n")
 
-    pkgs <- c(
-      "XVector",
-      "SummarizedExperiment","GenomicRanges","DelayedArray","SparseArray",
-      "DelayedMatrixStats","Biostrings","IRanges","S4Vectors",
-      "GenomeInfoDb","GenomeInfoDbData"
-    )
+    # Install biomformat + rhdf5 stack explicitly (this is what most often breaks loading)
+    BiocManager::install(c("rhdf5lib","rhdf5","biomformat"), update=FALSE, ask=FALSE)
 
-    BiocManager::install("XVector", update=FALSE, ask=FALSE)
-    BiocManager::install(setdiff(pkgs, "XVector"), update=FALSE, ask=FALSE)
-  '
-  log "Bioconductor dependency install completed (R-side)."
-  assert_r_version_and_path
+    # Now install phyloseq
+    BiocManager::install("phyloseq", update=FALSE, ask=FALSE)
+
+    cat(">>> Attempting library(phyloseq)...\n")
+    ok <- TRUE
+    tryCatch({
+      suppressPackageStartupMessages(library(phyloseq))
+    }, error=function(e){
+      ok <<- FALSE
+      cat(">>> ERROR loading phyloseq:\n")
+      cat(conditionMessage(e), "\n")
+      cat(">>> sessionInfo():\n"); print(sessionInfo())
+      cat(">>> Also trying to load biomformat/rhdf5 to pinpoint root cause...\n")
+      try(suppressPackageStartupMessages(library(biomformat)), silent=TRUE)
+      try(suppressPackageStartupMessages(library(rhdf5)), silent=TRUE)
+    })
+
+    quit(status=ifelse(ok, 0, 1))
+  ' || die "phyloseq installation failed (package still not loadable)."
+
+  log "phyloseq is installed and loadable."
 }
 
 # ----------------------------------------------------------
@@ -241,10 +266,8 @@ install_bioc_deps_r() {
 # ----------------------------------------------------------
 ensure_ancombc() {
   log "Checking for R package 'ANCOMBC' (ANCOM-BC2)..."
-  assert_r_version_and_path
 
   classify="UNKNOWN"
-
   classify="$(
     Rscript -e '
       out <- "UNKNOWN"
@@ -290,8 +313,6 @@ ensure_ancombc() {
   install_ancombc_cran_deps_conda
   install_bioc_deps_r
 
-  assert_r_version_and_path
-
   log "Installing ANCOMBC from GitHub (dependencies=FALSE, build=FALSE)..."
   Rscript -e 'remotes::install_github(
     "FrederickHuangLin/ANCOMBC",
@@ -324,8 +345,6 @@ run_downstream() {
   log "  USE_COUNTS_0_4= $USE_COUNTS_0_4"
   log "  USE_COUNTS_5  = $USE_COUNTS_5"
 
-  assert_r_version_and_path
-
   Rscript workflow/downstream_analysis.R \
     "$INFILE" \
     "$OUTDIR" \
@@ -335,5 +354,9 @@ run_downstream() {
 }
 
 create_env
+
+# phyloseq must be installed BEFORE downstream step7
+install_phyloseq_r
+
 ensure_ancombc
 run_downstream
