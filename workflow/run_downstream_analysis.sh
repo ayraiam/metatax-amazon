@@ -265,7 +265,14 @@ ensure_ancombc() {
   install_bioc_deps_r
 
   log "Installing ANCOMBC from GitHub (dependencies=FALSE): FrederickHuangLin/ANCOMBC"
-  Rscript -e 'remotes::install_github("FrederickHuangLin/ANCOMBC", upgrade="never", dependencies=FALSE)'
+  Rscript -e 'remotes::install_github(
+  "FrederickHuangLin/ANCOMBC",
+  upgrade = "never",
+  dependencies = FALSE,
+  build = FALSE,
+  build_vignettes = FALSE
+)
+'
 
   log "Verifying ANCOMBC after GitHub install..."
   if ! Rscript -e 'quit(status = ifelse(requireNamespace("ANCOMBC", quietly=TRUE), 0, 1))'; then
