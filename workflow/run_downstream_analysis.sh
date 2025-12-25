@@ -3,8 +3,8 @@
 # Script: workflow/run_downstream_analysis.sh
 # Purpose:
 #   - Create/activate a clean env for downstream analysis
+#   - Ensure phyloseq + microbiome are available (R-side; no conda downgrade)
 #   - Ensure ANCOMBC (for ANCOM-BC2) is available (GitHub preferred)
-#   - Ensure phyloseq is available (WITHOUT conda downgrading R)
 #   - Run downstream_analysis.R
 # ==========================================================
 set -euo pipefail
@@ -61,7 +61,6 @@ assert_r_version_and_path() {
 
 # ==========================================================
 # Install toolchain + system libs in env
-# Key addition: hdf5 (needed for rhdf5/biomformat/phyloseq on many HPCs)
 # ==========================================================
 install_build_deps_conda() {
   log "Ensuring build/system dependencies exist in the env (for compiling/loading Bioconductor packages)..."
@@ -77,7 +76,6 @@ install_build_deps_conda() {
     gxx
     gfortran
 
-    # common headers/libs used by R/Bioc packages
     zlib
     bzip2
     xz
@@ -88,7 +86,7 @@ install_build_deps_conda() {
     icu
     readline
 
-    # HDF5 is the usual culprit for phyloseq->biomformat->rhdf5 load failures
+    # HDF5 often needed for rhdf5/biomformat/phyloseq loadability
     hdf5
   )
 
@@ -175,7 +173,6 @@ create_env() {
   log "Env ready: $(which Rscript)"
 
   assert_r_version_and_path
-
   install_build_deps_conda
 }
 
@@ -185,7 +182,6 @@ create_env() {
 install_bioc_deps_r() {
   log "Installing required Bioconductor dependencies via BiocManager (R-side; matches your R=4.5.*)..."
 
-  #More deterministic compilation + prints useful debug if something fails
   Rscript -e '
     options(Ncpus = 1)
     Sys.setenv(MAKEFLAGS = "-j1")
@@ -193,10 +189,6 @@ install_bioc_deps_r() {
     if (!requireNamespace("BiocManager", quietly=TRUE)) {
       install.packages("BiocManager", repos="https://cloud.r-project.org")
     }
-
-    cat(">>> R: ", as.character(getRversion()), "\n", sep="")
-    cat(">>> Bioconductor: ", as.character(BiocManager::version()), "\n", sep="")
-    cat(">>> .libPaths():\n"); print(.libPaths())
 
     pkgs <- c(
       "XVector",
@@ -217,12 +209,10 @@ install_bioc_deps_r() {
 }
 
 # ==========================================================
-# Install phyloseq via BiocManager + enforce loadability
-# This avoids conda solver downgrading R AND captures the real load error.
-# Key deps included: rhdf5lib/rhdf5/biomformat (common failure point).
+# Install phyloseq + microbiome via BiocManager and verify load
 # ==========================================================
-install_phyloseq_r() {
-  log "Ensuring 'phyloseq' is installed and loadable (BiocManager; no conda bioconductor-phyloseq)..."
+install_phyloseq_and_microbiome_r() {
+  log "Ensuring 'phyloseq' + 'microbiome' are installed and loadable (BiocManager; no conda bioconductor-phyloseq)..."
   assert_r_version_and_path
 
   Rscript -e '
@@ -233,32 +223,30 @@ install_phyloseq_r() {
       install.packages("BiocManager", repos="https://cloud.r-project.org")
     }
 
-    cat(">>> Installing phyloseq dependency chain via Bioconductor...\n")
-
-    # Install biomformat + rhdf5 stack explicitly (this is what most often breaks loading)
+    # Install biomformat + rhdf5 stack explicitly (common failure point)
     BiocManager::install(c("rhdf5lib","rhdf5","biomformat"), update=FALSE, ask=FALSE)
 
-    # Now install phyloseq
+    # Install phyloseq
     BiocManager::install("phyloseq", update=FALSE, ask=FALSE)
 
-    cat(">>> Attempting library(phyloseq)...\n")
+    ### CHANGED ### Install microbiome (required by ANCOMBC when data is phyloseq)
+    BiocManager::install("microbiome", update=FALSE, ask=FALSE)
+
+    # Verify loadability
     ok <- TRUE
-    tryCatch({
-      suppressPackageStartupMessages(library(phyloseq))
-    }, error=function(e){
+    tryCatch({ suppressPackageStartupMessages(library(phyloseq)) }, error=function(e){
       ok <<- FALSE
-      cat(">>> ERROR loading phyloseq:\n")
-      cat(conditionMessage(e), "\n")
-      cat(">>> sessionInfo():\n"); print(sessionInfo())
-      cat(">>> Also trying to load biomformat/rhdf5 to pinpoint root cause...\n")
-      try(suppressPackageStartupMessages(library(biomformat)), silent=TRUE)
-      try(suppressPackageStartupMessages(library(rhdf5)), silent=TRUE)
+      cat(">>> ERROR loading phyloseq:\n"); cat(conditionMessage(e), "\n")
+    })
+    tryCatch({ suppressPackageStartupMessages(library(microbiome)) }, error=function(e){
+      ok <<- FALSE
+      cat(">>> ERROR loading microbiome:\n"); cat(conditionMessage(e), "\n")
     })
 
     quit(status=ifelse(ok, 0, 1))
-  ' || die "phyloseq installation failed (package still not loadable)."
+  ' || die "phyloseq/microbiome installation failed (package still not loadable)."
 
-  log "phyloseq is installed and loadable."
+  log "phyloseq + microbiome are installed and loadable."
 }
 
 # ----------------------------------------------------------
@@ -355,8 +343,8 @@ run_downstream() {
 
 create_env
 
-# phyloseq must be installed BEFORE downstream step7
-install_phyloseq_r
+#phyloseq + microbiome must be installed BEFORE downstream step7
+install_phyloseq_and_microbiome_r
 
 ensure_ancombc
 run_downstream
