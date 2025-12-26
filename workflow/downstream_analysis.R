@@ -631,6 +631,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     p_adj_method = "BH",
     prv_cut = 0.10,
     lib_cut = 0,
+    group = "env_group",
     struc_zero = TRUE,
     neg_lb = TRUE,
     alpha = 0.05,
