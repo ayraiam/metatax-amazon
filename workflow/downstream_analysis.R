@@ -696,16 +696,8 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   #   diff_robust_env_groupPeneira, passed_ss_env_groupPeneira
   # =========================
   
-  res_root <- if (!is.null(res$res)) res$res else res
+  res_tbl <- if (!is.null(res$res)) res$res else res
   
-  # Try to find a "long" results table in known slots
-  candidates_tbl <- c("res", "tab", "results", "primary_results", "primary", "out")
-  res_tbl <- NULL
-  for (nm in candidates_tbl) {
-    if (!is.null(res_root[[nm]]) && is.data.frame(res_root[[nm]])) { res_tbl <- res_root[[nm]]; break }
-  }
-  
-  # If still NULL, some versions store under res_root$primary_results$W etc (matrix-style)
   # We'll handle matrix-style below; but if res_tbl exists, we will use it.
   if (!is.null(res_tbl)) {
     res_dt <- data.table::as.data.table(res_tbl)
