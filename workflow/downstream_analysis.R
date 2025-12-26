@@ -1,4 +1,4 @@
-usr/bin/env Rscript
+#!/usr/bin/env Rscript
 # ==========================================================
 # downstream_analysis.R
 # 1) Add 'environment' from filename rules
@@ -29,6 +29,15 @@ if (length(args) < 2)
 infile  <- args[1]
 outdir  <- args[2]
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+### NEW/CHANGED ### global output roots (always under results/)
+RESULTS_ROOT <- dirname(outdir)  # assumes outdir is inside results/...
+TABLES_DIR   <- file.path(RESULTS_ROOT, "tables")
+PLOTS_DIR    <- file.path(RESULTS_ROOT, "plots")
+dir.create(TABLES_DIR, showWarnings = FALSE, recursive = TRUE)
+dir.create(PLOTS_DIR,  showWarnings = FALSE, recursive = TRUE)
+message(">>> TABLES_DIR = ", TABLES_DIR)
+message(">>> PLOTS_DIR  = ", PLOTS_DIR)
 
 ### downstream mode + numeric source (passed from runall.sh)
 MODE <- toupper(Sys.getenv("MODE", "16S"))
@@ -335,7 +344,8 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
 # ==========================================================
 # STEP 0: Read + stage
 # ==========================================================
-step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5) {
+#added TABLES_DIR arg; write tables into results/tables
+step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR) {
   read_obj <- read_and_shape(infile)
   dt_raw   <- read_obj$raw
   
@@ -346,17 +356,20 @@ step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_
   # CLR table source for concordance
   clr_obj <- make_genus_clr_steps(dt_raw, use_counts = USE_COUNTS_5)
   
+  
   fwrite(
     clr_obj$table,
-    file = file.path(outdir, paste0(prefix, "_genus_clr_steps.tsv")),
+    file = file.path(TABLES_DIR, paste0(prefix, "_genus_clr_steps.tsv")),
     sep  = "\t"
   )
   
   dt_stage <- copy(dt_raw)
   if ("value" %in% names(dt_stage)) dt_stage[, value := NULL]
+  
+  
   fwrite(
     dt_stage,
-    file = file.path(outdir, paste0(prefix, "_with_environment.tsv")),
+    file = file.path(TABLES_DIR, paste0(prefix, "_with_environment.tsv")),
     sep  = "\t"
   )
   
@@ -366,33 +379,43 @@ step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_
 # ==========================================================
 # STEP 1: Stacked bars
 # ==========================================================
-step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix) {
+#added PLOTS_DIR arg; write plots into results/plots
+step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR) {
   p_family <- make_env_stacks(
     dt_raw, "family",
-    file.path(outdir, paste0(prefix, "_stacks_family.png")),
-    file.path(outdir, paste0(prefix, "_stacks_family.pdf")),
+    
+    file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.png")),
+    file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.pdf")),
     N = 20, title_rank = "Family", value_col = VAL_0_4
   )
   p_genus <- make_env_stacks(
     dt_raw, "genus",
-    file.path(outdir, paste0(prefix, "_stacks_genus.png")),
-    file.path(outdir, paste0(prefix, "_stacks_genus.pdf")),
+    
+    file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.png")),
+    file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.pdf")),
     N = 20, title_rank = "Genus", value_col = VAL_0_4
   )
   
   if (!is.null(p_family) && !is.null(p_genus)) {
     combined <- plot_grid(p_family, p_genus, ncol = 1, rel_heights = c(1, 1), align = "v")
-    ggsave(file.path(outdir, paste0(prefix, "_stacks_family_genus_grid.png")),
-           combined, width = 22, height = 10, dpi = 300)
-    ggsave(file.path(outdir, paste0(prefix, "_stacks_family_genus_grid.pdf")),
-           combined, width = 22, height = 10)
+    ggsave(
+      
+      file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.png")),
+      combined, width = 22, height = 10, dpi = 300
+    )
+    ggsave(
+      
+      file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.pdf")),
+      combined, width = 22, height = 10
+    )
   }
 }
 
 # ==========================================================
 # STEP 2: Alpha diversity
 # ==========================================================
-step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix) {
+#added TABLES_DIR arg; write tables into results/tables
+step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR) {
   mx_rel  <- build_matrix(dt_raw, "genus", value_col = VAL_0_4)
   mat_rel <- mx_rel$mat
   meta    <- mx_rel$meta
@@ -411,7 +434,8 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix) {
   alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
   
   alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
-  fwrite(alpha_df, file = file.path(outdir, paste0(prefix, "_alpha_diversity.tsv")), sep = "\t")
+  
+  fwrite(alpha_df, file = file.path(TABLES_DIR, paste0(prefix, "_alpha_diversity.tsv")), sep = "\t")
   
   # (keeping your existing plotting/stat code as-is)
   list(rel = rel, meta = meta, alpha_df = alpha_df)
@@ -420,7 +444,8 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix) {
 # ==========================================================
 # STEP 3: Beta diversity PCoA
 # ==========================================================
-step3_beta_pcoa <- function(rel, meta, outdir, prefix) {
+#added TABLES_DIR + PLOTS_DIR args; write outputs to results/tables + results/plots
+step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
   env_colors <- c(
     "Campina"  = "#FFCC00",
     "Floresta" = "#99CC33",
@@ -445,7 +470,7 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix) {
   )
   pcoa_df <- merge(pcoa_df, meta, by = "file", all.x = TRUE)
   
-  fwrite(pcoa_df, file = file.path(outdir, paste0(prefix, "_pcoa_braycurtis.tsv")), sep = "\t")
+  fwrite(pcoa_df, file = file.path(TABLES_DIR, paste0(prefix, "_pcoa_braycurtis.tsv")), sep = "\t")
   
   p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
     geom_point(size = 2.5, alpha = 0.9) +
@@ -453,8 +478,11 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix) {
     labs(x = pc1_lab, y = pc2_lab, title = "") +
     theme_base
   
-  ggsave(file.path(outdir, paste0(prefix, "_pcoa_braycurtis_env.png")),
-         p_pcoa, width = 5, height = 4, dpi = 300)
+  ggsave(
+    
+    file.path(PLOTS_DIR, paste0(prefix, "_pcoa_braycurtis_env.png")),
+    p_pcoa, width = 5, height = 4, dpi = 300
+  )
   
   list(bray = bray)
 }
@@ -462,14 +490,16 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix) {
 # ==========================================================
 # STEP 4: Beta stats
 # ==========================================================
-step4_beta_stats <- function(bray, meta, outdir, prefix) {
+#added TABLES_DIR arg; write outputs to results/tables
+step4_beta_stats <- function(bray, meta, outdir, prefix, TABLES_DIR) {
   set.seed(2025)
   meta$environment <- factor(meta$environment)
   
   perm <- vegan::adonis2(bray ~ environment, data = meta, permutations = 999)
   perm_df <- as.data.frame(perm)
+  
   fwrite(as.data.table(perm_df, keep.rownames = "term"),
-         file = file.path(outdir, paste0(prefix, "_beta_permanova.tsv")), sep = "\t")
+         file = file.path(TABLES_DIR, paste0(prefix, "_beta_permanova.tsv")), sep = "\t")
   
   bd <- vegan::betadisper(bray, meta$environment)
   bd_anova   <- as.data.frame(anova(bd))
@@ -477,15 +507,17 @@ step4_beta_stats <- function(bray, meta, outdir, prefix) {
   bd_perm_df <- as.data.frame(bd_perm$tab)
   
   fwrite(as.data.table(bd_anova, keep.rownames = "term"),
-         file = file.path(outdir, paste0(prefix, "_beta_betadisper_anova.tsv")), sep = "\t")
+         file = file.path(TABLES_DIR, paste0(prefix, "_beta_betadisper_anova.tsv")), sep = "\t")
+
   fwrite(as.data.table(bd_perm_df, keep.rownames = "term"),
-         file = file.path(outdir, paste0(prefix, "_beta_betadisper_permutest.tsv")), sep = "\t")
+         file = file.path(TABLES_DIR, paste0(prefix, "_beta_betadisper_permutest.tsv")), sep = "\t")
 }
 
 # ==========================================================
 # STEP 5: Concordance scatter
 # ==========================================================
-step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
+#added TABLES_DIR + PLOTS_DIR; plots -> results/plots; paired tables -> results/tables
+step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR) {
   clr_tbl <- copy(clr_obj$table)
   
   clr_tbl <- clr_tbl[
@@ -497,7 +529,7 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
   target_codes <- c("500", "1500", "2500", "3500", "4500")
   clr_tbl <- clr_tbl[pairing_code %in% target_codes]
   
-  corr_dir <- file.path(outdir, paste0(prefix, "_code_concordance_", MODE))
+  corr_dir <- file.path(PLOTS_DIR, paste0(prefix, "_code_concordance_", MODE))
   dir.create(corr_dir, showWarnings = FALSE, recursive = TRUE)
   
   fl <- clr_tbl[environment == "Floresta",
@@ -548,11 +580,12 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
     ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter.pdf")),
            p, width = 5.2, height = 4.2)
     
+    
     fwrite(
       df_out[, .(pairing_code, replicate, genus,
                  file_peneira, file_floresta, floresta_partner,
                  CLR_Peneira, CLR_Floresta, deltaCLR, abs_deltaCLR, pair_id)],
-      file = file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_paired_dots.tsv")),
+      file = file.path(TABLES_DIR, paste0(prefix, "_code_", cc, "_L01_paired_dots.tsv")),
       sep  = "\t"
     )
   }
@@ -561,9 +594,14 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
 }
 
 # ==========================================================
-# STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ (robust extraction)
+# STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ
+#   - saves raw res to TABLES_DIR
+#   - saves volcano to PLOTS_DIR
+#   - can handle *one-row-per-taxon* table with columns like:
+#          lfc_env_groupPeneira, se_env_groupPeneira, p_env_groupPeneira, q_env_groupPeneira, etc.
 # ==========================================================
-step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
+#added TABLES_DIR + PLOTS_DIR args; regex-based extraction; correct direction labeling
+step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR) {
   
   value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
   message(">>> Step 7 (ANCOM-BC2) value_col = ", value_col, " (driven by USE_COUNTS_0_4)")
@@ -596,7 +634,10 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   # ----- metadata -----
   meta_df <- as.data.frame(wide[, .(file, environment)])
   colnames(meta_df)[colnames(meta_df) == "environment"] <- "env_group"
+  
+  #set baseline explicitly: Floresta is reference; coefficient is Peneira vs Floresta
   meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
+  
   rownames(meta_df) <- meta_df$file
   meta_df$file <- NULL
   
@@ -631,7 +672,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     p_adj_method = "BH",
     prv_cut = 0.10,
     lib_cut = 0,
-    group = "env_group",      # required when struc_zero=TRUE
+    group = "env_group",
     struc_zero = TRUE,
     neg_lb = TRUE,
     alpha = 0.05,
@@ -640,121 +681,153 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   )
   
   # =========================
-  # ### CHANGED ### robustly locate result tables across ANCOMBC versions
+  # Save raw result object + (if available) its primary table(s)
   # =========================
-  get_tbl <- function(obj, candidates) {
-    for (nm in candidates) {
-      if (!is.null(obj[[nm]])) return(obj[[nm]])
-    }
-    NULL
-  }
   
-  # different versions store in different places
+  save_prefix <- paste0(prefix, "_ancombc2_raw")
+  saveRDS(res, file = file.path(TABLES_DIR, paste0(save_prefix, ".rds")))
+  message(">>> Saved ANCOMBC2 res object to: ", file.path(TABLES_DIR, paste0(save_prefix, ".rds")))
+  
+  # =========================
+  # Extract results robustly:
+  # Preferred case (your observed output): a single table with columns like
+  #   taxon, lfc_env_groupPeneira, se_env_groupPeneira, W_env_groupPeneira,
+  #   p_env_groupPeneira, q_env_groupPeneira, diff_env_groupPeneira,
+  #   diff_robust_env_groupPeneira, passed_ss_env_groupPeneira
+  # =========================
+  
   res_root <- if (!is.null(res$res)) res$res else res
   
-  lfc  <- get_tbl(res_root, c("lfc", "beta", "coefficients"))
-  se   <- get_tbl(res_root, c("se", "se_hat"))
-  W    <- get_tbl(res_root, c("W", "W_stat"))
-  pval <- get_tbl(res_root, c("p_val", "pvalue", "p_val_hat"))
-  qval <- get_tbl(res_root, c("q_val", "qvalue", "q_val_hat"))
-  diff <- get_tbl(res_root, c("diff_abn", "diff", "diff_abn_hat"))
-  
-  # If still NULL, try one level deeper (some store under "primary_results")
-  if (is.null(lfc) && !is.null(res_root$primary_results)) {
-    pr <- res_root$primary_results
-    lfc  <- get_tbl(pr, c("lfc", "beta"))
-    se   <- get_tbl(pr, c("se"))
-    W    <- get_tbl(pr, c("W"))
-    pval <- get_tbl(pr, c("p_val", "pvalue"))
-    qval <- get_tbl(pr, c("q_val", "qvalue"))
-    diff <- get_tbl(pr, c("diff_abn", "diff"))
+  # Try to find a "long" results table in known slots
+  candidates_tbl <- c("res", "tab", "results", "primary_results", "primary", "out")
+  res_tbl <- NULL
+  for (nm in candidates_tbl) {
+    if (!is.null(res_root[[nm]]) && is.data.frame(res_root[[nm]])) { res_tbl <- res_root[[nm]]; break }
   }
   
-  if (is.null(lfc)) {
-    message(">>> Step 7 DEBUG: names(res) = ", paste(names(res), collapse=", "))
-    message(">>> Step 7 DEBUG: names(res_root) = ", paste(names(res_root), collapse=", "))
-    stop("ANCOM-BC2 returned no lfc/beta table in known locations. Structure changed or failed silently.")
-  }
-  
-  # Ensure matrices
-  lfc  <- as.matrix(lfc)
-  se   <- if (!is.null(se))   as.matrix(se)   else matrix(NA_real_, nrow(lfc), ncol(lfc))
-  W    <- if (!is.null(W))    as.matrix(W)    else matrix(NA_real_, nrow(lfc), ncol(lfc))
-  pval <- if (!is.null(pval)) as.matrix(pval) else matrix(NA_real_, nrow(lfc), ncol(lfc))
-  qval <- if (!is.null(qval)) as.matrix(qval) else matrix(NA_real_, nrow(lfc), ncol(lfc))
-  diff <- if (!is.null(diff)) as.matrix(diff) else matrix(NA, nrow(lfc), ncol(lfc))
-  
-  # =========================
-  # ### CHANGED ### pick coefficient column even if colnames are missing
-  # =========================
-  coef_candidates <- colnames(lfc)
-  if (is.null(coef_candidates)) coef_candidates <- character(0)
-  
-  message(">>> Step 7: Available coefficient columns: ", paste(coef_candidates, collapse = ", "))
-  
-  coef_col <- NA_integer_
-  
-  if (length(coef_candidates) == 0 && ncol(lfc) == 1) {
-    # single coefficient, but unnamed
-    coef_col <- 1L
-    message(">>> Step 7: lfc has 1 unnamed column; using column 1.")
-  } else {
-    hit <- grep("^env_group", coef_candidates, value = TRUE)
-    if (length(hit) == 0) hit <- grep("Peneira|Floresta", coef_candidates, value = TRUE)
+  # If still NULL, some versions store under res_root$primary_results$W etc (matrix-style)
+  # We'll handle matrix-style below; but if res_tbl exists, we will use it.
+  if (!is.null(res_tbl)) {
+    res_dt <- data.table::as.data.table(res_tbl)
     
-    if (length(hit) == 0) {
-      message(">>> Step 7 DEBUG: lfc dim = ", paste(dim(lfc), collapse=" x "))
-      stop("ANCOM-BC2 output does not contain expected coefficient column.")
+    # ensure 'taxon' column exists (or rownames)
+    if (!"taxon" %in% names(res_dt)) {
+      # fallback: first column might be taxa, or rownames
+      if (nrow(res_dt) > 0 && !is.null(rownames(res_tbl))) {
+        res_dt[, taxon := rownames(res_tbl)]
+      } else {
+        setnames(res_dt, 1, "taxon")
+      }
     }
     
-    coef_col <- match(hit[1], coef_candidates)
+    # Save the full table for debugging / provenance
+    
+    fwrite(res_dt, file = file.path(TABLES_DIR, paste0(prefix, "_ancombc2_full_table.tsv")), sep = "\t")
+    
+    # figure out baseline/other from factor levels
+    lvl <- levels(meta_df$env_group)
+    baseline_level <- lvl[1]
+    other_level    <- lvl[2]
+    message(">>> Step 7: baseline = ", baseline_level, " ; coefficient level = ", other_level)
+    
+    # Build regex patterns that adapt to group name (e.g., Peneira)
+    # We want: lfc_env_group<OTHER>, se_env_group<OTHER>, ...
+    # Also tolerate underscores or parentheses variants.
+    
+    esc_other <- gsub("([^A-Za-z0-9])", "\\\\\\1", other_level)
+    pat_lfc   <- paste0("^lfc_.*", esc_other, "$")
+    pat_se    <- paste0("^se_.*",  esc_other, "$")
+    pat_W     <- paste0("^W_.*",   esc_other, "$")
+    pat_p     <- paste0("^p_.*",   esc_other, "$")
+    pat_q     <- paste0("^q_.*",   esc_other, "$")
+    pat_diff  <- paste0("^diff_.*", esc_other, "$")
+    pat_dr    <- paste0("^diff_robust_.*", esc_other, "$")
+    pat_pss   <- paste0("^passed_ss_.*", esc_other, "$")
+    
+    pick1 <- function(pat, cols) {
+      hit <- grep(pat, cols, value = TRUE)
+      if (length(hit) == 0) return(NA_character_)
+      hit[1]
+    }
+    
+    cols <- names(res_dt)
+    col_lfc  <- pick1(pat_lfc, cols)
+    col_se   <- pick1(pat_se, cols)
+    col_W    <- pick1(pat_W, cols)
+    col_p    <- pick1(pat_p, cols)
+    col_q    <- pick1(pat_q, cols)
+    col_diff <- pick1(pat_diff, cols)
+    col_dr   <- pick1(pat_dr, cols)
+    col_pss  <- pick1(pat_pss, cols)
+    
+    message(">>> Step 7: picked columns:")
+    message("    lfc  = ", col_lfc)
+    message("    se   = ", col_se)
+    message("    W    = ", col_W)
+    message("    p    = ", col_p)
+    message("    q    = ", col_q)
+    message("    diff = ", col_diff)
+    message("    diff_robust = ", col_dr)
+    message("    passed_ss   = ", col_pss)
+    
+    if (is.na(col_lfc) || is.na(col_q)) {
+      stop("ANCOM-BC2 table does not contain expected lfc/q columns for the non-baseline level. See *_ancombc2_full_table.tsv in TABLES_DIR.")
+    }
+    
+    out <- data.table(
+      genus = res_dt$taxon,
+      lfc   = as.numeric(res_dt[[col_lfc]]),
+      se    = if (!is.na(col_se))   as.numeric(res_dt[[col_se]])   else NA_real_,
+      W     = if (!is.na(col_W))    as.numeric(res_dt[[col_W]])    else NA_real_,
+      p_val = if (!is.na(col_p))    as.numeric(res_dt[[col_p]])    else NA_real_,
+      q_val = as.numeric(res_dt[[col_q]]),
+      diff_abn     = if (!is.na(col_diff)) as.integer(res_dt[[col_diff]]) else NA_integer_,
+      diff_robust  = if (!is.na(col_dr))   as.integer(res_dt[[col_dr]])   else NA_integer_,
+      passed_ss    = if (!is.na(col_pss))  as.integer(res_dt[[col_pss]])  else NA_integer_
+    )
+    
+    #direction labels reflect baseline vs other
+    out[, lfc_direction := ifelse(lfc > 0,
+                                  paste0("Higher in ", other_level),
+                                  paste0("Higher in ", baseline_level))]
+    
+    setorder(out, q_val, p_val, -abs(lfc), genus)
+    
+    # write results table
+    #tables -> TABLES_DIR and dynamic filename with actual levels
+    out_tsv <- file.path(TABLES_DIR, paste0(prefix, "_ancombc2_genus_", baseline_level, "_vs_", other_level, ".tsv"))
+    fwrite(out, file = out_tsv, sep = "\t")
+    message(">>> Step 7: wrote ANCOM-BC2 summary table: ", out_tsv)
+    
+    # volcano plot
+    out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
+    out[, significance := ifelse(q_val < 0.05, "q < 0.05", "ns")]
+    
+    p <- ggplot(out, aes(x = lfc, y = neglog10_q, color = significance)) +
+      geom_point(alpha = 0.6, size = 1.2) +
+      geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.6) +
+      geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.4) +
+      scale_color_manual(values = c("q < 0.05" = "red", "ns" = "grey60")) +
+      labs(
+        x = paste0("Log fold-change (", other_level, " vs ", baseline_level, ")"),
+        y = "-log10(q-value)",
+        title = paste0("ANCOM-BC2 (genus): ", other_level, " vs ", baseline_level),
+        color = "Significance"
+      ) +
+      theme_classic(base_size = 12) +
+      theme(legend.position = "bottom")
+    
+    #plots -> PLOTS_DIR and dynamic filename
+    out_png <- file.path(PLOTS_DIR, paste0(prefix, "_ancombc2_genus_", baseline_level, "_vs_", other_level, ".png"))
+    ggsave(out_png, p, width = 6, height = 5, dpi = 300)
+    
+    message(">>> Step 7: ANCOM-BC2 completed successfully. Found ",
+            sum(out$q_val < 0.05, na.rm = TRUE), " significant genera at q < 0.05.")
+    return(invisible(out))
   }
   
-  # output table
-  out <- data.table::data.table(
-    genus = rownames(lfc),
-    lfc   = lfc[, coef_col],
-    se    = se[,  coef_col],
-    W     = W[,   coef_col],
-    p_val = pval[, coef_col],
-    q_val = qval[, coef_col],
-    diff_abn = diff[, coef_col]
-  )
-  
-  out[, lfc_direction := ifelse(lfc > 0, "Higher in Peneira", "Higher in Floresta")]
-  data.table::setorder(out, q_val, p_val, -abs(lfc), genus)
-  
-  data.table::fwrite(
-    out,
-    file = file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.tsv")),
-    sep = "\t"
-  )
-  
-  # volcano
-  out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
-  out[, significance := ifelse(q_val < 0.05, "q < 0.05", "ns")]
-  
-  p <- ggplot2::ggplot(out, ggplot2::aes(x = lfc, y = neglog10_q, color = significance)) +
-    ggplot2::geom_point(alpha = 0.6, size = 1.2) +
-    ggplot2::geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.6) +
-    ggplot2::geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.4) +
-    ggplot2::scale_color_manual(values = c("q < 0.05" = "red", "ns" = "grey60")) +
-    ggplot2::labs(
-      x = "Log fold-change (Peneira vs Floresta)",
-      y = "-log10(q-value)",
-      title = "ANCOM-BC2 (genus): Peneira vs Floresta",
-      color = "Significance"
-    ) +
-    ggplot2::theme_classic(base_size = 12) +
-    ggplot2::theme(legend.position = "bottom")
-  
-  ggplot2::ggsave(
-    file.path(outdir, paste0(prefix, "_ancombc2_genus_Floresta_vs_Peneira.png")),
-    p, width = 6, height = 5, dpi = 300
-  )
-  
-  message(">>> Step 7: ANCOM-BC2 completed successfully. Found ",
-          sum(out$q_val < 0.05, na.rm = TRUE), " significant genera at q < 0.05.")
+  # If we reach here: no single "full table" detected; fallback to your older matrix-style extraction
+  stop("Step 7: Could not locate a single ANCOM-BC2 results table in the returned object. (You should still have the saved .rds in TABLES_DIR to inspect.)")
 }
 
 # ==========================================================
@@ -762,24 +835,26 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
 # ==========================================================
 merge_batches_if_needed(infile)
 
-obj0 <- step0_read_stage(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5)
+obj0 <- step0_read_stage(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR)
 dt_raw <- obj0$dt_raw
 VAL_0_4 <- obj0$VAL_0_4
 clr_obj <- obj0$clr_obj
 
-step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix)
+step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
 
-obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix)
+obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR)
 rel  <- obj2$rel
 meta <- obj2$meta
 
-obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix)
+obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
 bray <- obj3$bray
 
-step4_beta_stats(bray, meta, outdir, prefix)
+step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
 
-step5_concordance(clr_obj, outdir, prefix, MODE)
+step5_concordance(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
 
-step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_0_4)
+step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR)
 
-message(">>> Done. Outputs in: ", outdir)
+message(">>> Done. Outputs in:")
+message(">>>   tables: ", TABLES_DIR)
+message(">>>   plots : ", PLOTS_DIR)
