@@ -1,4 +1,4 @@
-#!/usr/bin/env Rscript
+usr/bin/env Rscript
 # ==========================================================
 # downstream_analysis.R
 # 1) Add 'environment' from filename rules
@@ -561,7 +561,7 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE) {
 }
 
 # ==========================================================
-# STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ (workaround)
+# STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ (robust extraction)
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   
@@ -573,7 +573,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
       stop("Missing R package ANCOMBC/ancombc.")
     }
     if (!requireNamespace("phyloseq", quietly = TRUE)) {
-      stop("Missing R package 'phyloseq'. Install it (conda: bioconductor-phyloseq or R: BiocManager::install('phyloseq')).")
+      stop("Missing R package 'phyloseq'.")
     }
     library(phyloseq)
   })
@@ -606,7 +606,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   otu <- t(mat)  # taxa x samples
   storage.mode(otu) <- "numeric"
   
-  # Align sample names explicitly (phyloseq requires exact matching)
+  # Align sample names explicitly
   common <- intersect(colnames(otu), rownames(meta_df))
   if (length(common) < 2) stop(">>> Step 7 ERROR: too few common samples between otu and meta.")
   otu <- otu[, common, drop = FALSE]
@@ -621,17 +621,17 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
   message(">>> Step 7: phyloseq built. taxa=", ntaxa(ps), " samples=", nsamples(ps))
   message(">>> Step 7: sample vars in phyloseq = ", paste(colnames(as(sample_data(ps), "data.frame")), collapse = ","))
   
-  # call ANCOM-BC2 on phyloseq object
+  # call ancombc2
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
   res <- ancombc2_fun(
-    data = ps,                     
-    fix_formula = "env_group",      # formula refers to sample_data(ps)
+    data = ps,
+    fix_formula = "env_group",
     rand_formula = NULL,
     p_adj_method = "BH",
     prv_cut = 0.10,
     lib_cut = 0,
-    group = "env_group",
+    group = "env_group",      # required when struc_zero=TRUE
     struc_zero = TRUE,
     neg_lb = TRUE,
     alpha = 0.05,
@@ -639,24 +639,86 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4) {
     verbose = TRUE
   )
   
-  # pick coefficient column
-  coef_candidates <- colnames(res$res$lfc)
-  coef_col <- grep("^env_group", coef_candidates, value = TRUE)
-  if (length(coef_col) == 0) coef_col <- grep("Peneira|Floresta", coef_candidates, value = TRUE)
-  if (length(coef_col) == 0) {
-    message(">>> Step 7: Available coefficient columns: ", paste(coef_candidates, collapse = ", "))
-    stop("ANCOM-BC2 output does not contain expected coefficient column.")
+  # =========================
+  # ### CHANGED ### robustly locate result tables across ANCOMBC versions
+  # =========================
+  get_tbl <- function(obj, candidates) {
+    for (nm in candidates) {
+      if (!is.null(obj[[nm]])) return(obj[[nm]])
+    }
+    NULL
   }
-  coef_col <- coef_col[1]
   
+  # different versions store in different places
+  res_root <- if (!is.null(res$res)) res$res else res
+  
+  lfc  <- get_tbl(res_root, c("lfc", "beta", "coefficients"))
+  se   <- get_tbl(res_root, c("se", "se_hat"))
+  W    <- get_tbl(res_root, c("W", "W_stat"))
+  pval <- get_tbl(res_root, c("p_val", "pvalue", "p_val_hat"))
+  qval <- get_tbl(res_root, c("q_val", "qvalue", "q_val_hat"))
+  diff <- get_tbl(res_root, c("diff_abn", "diff", "diff_abn_hat"))
+  
+  # If still NULL, try one level deeper (some store under "primary_results")
+  if (is.null(lfc) && !is.null(res_root$primary_results)) {
+    pr <- res_root$primary_results
+    lfc  <- get_tbl(pr, c("lfc", "beta"))
+    se   <- get_tbl(pr, c("se"))
+    W    <- get_tbl(pr, c("W"))
+    pval <- get_tbl(pr, c("p_val", "pvalue"))
+    qval <- get_tbl(pr, c("q_val", "qvalue"))
+    diff <- get_tbl(pr, c("diff_abn", "diff"))
+  }
+  
+  if (is.null(lfc)) {
+    message(">>> Step 7 DEBUG: names(res) = ", paste(names(res), collapse=", "))
+    message(">>> Step 7 DEBUG: names(res_root) = ", paste(names(res_root), collapse=", "))
+    stop("ANCOM-BC2 returned no lfc/beta table in known locations. Structure changed or failed silently.")
+  }
+  
+  # Ensure matrices
+  lfc  <- as.matrix(lfc)
+  se   <- if (!is.null(se))   as.matrix(se)   else matrix(NA_real_, nrow(lfc), ncol(lfc))
+  W    <- if (!is.null(W))    as.matrix(W)    else matrix(NA_real_, nrow(lfc), ncol(lfc))
+  pval <- if (!is.null(pval)) as.matrix(pval) else matrix(NA_real_, nrow(lfc), ncol(lfc))
+  qval <- if (!is.null(qval)) as.matrix(qval) else matrix(NA_real_, nrow(lfc), ncol(lfc))
+  diff <- if (!is.null(diff)) as.matrix(diff) else matrix(NA, nrow(lfc), ncol(lfc))
+  
+  # =========================
+  # ### CHANGED ### pick coefficient column even if colnames are missing
+  # =========================
+  coef_candidates <- colnames(lfc)
+  if (is.null(coef_candidates)) coef_candidates <- character(0)
+  
+  message(">>> Step 7: Available coefficient columns: ", paste(coef_candidates, collapse = ", "))
+  
+  coef_col <- NA_integer_
+  
+  if (length(coef_candidates) == 0 && ncol(lfc) == 1) {
+    # single coefficient, but unnamed
+    coef_col <- 1L
+    message(">>> Step 7: lfc has 1 unnamed column; using column 1.")
+  } else {
+    hit <- grep("^env_group", coef_candidates, value = TRUE)
+    if (length(hit) == 0) hit <- grep("Peneira|Floresta", coef_candidates, value = TRUE)
+    
+    if (length(hit) == 0) {
+      message(">>> Step 7 DEBUG: lfc dim = ", paste(dim(lfc), collapse=" x "))
+      stop("ANCOM-BC2 output does not contain expected coefficient column.")
+    }
+    
+    coef_col <- match(hit[1], coef_candidates)
+  }
+  
+  # output table
   out <- data.table::data.table(
-    genus = rownames(res$res$lfc),
-    lfc   = res$res$lfc[, coef_col],
-    se    = res$res$se[,  coef_col],
-    W     = res$res$W[,   coef_col],
-    p_val = res$res$p_val[, coef_col],
-    q_val = res$res$q_val[, coef_col],
-    diff_abn = res$res$diff_abn[, coef_col]
+    genus = rownames(lfc),
+    lfc   = lfc[, coef_col],
+    se    = se[,  coef_col],
+    W     = W[,   coef_col],
+    p_val = pval[, coef_col],
+    q_val = qval[, coef_col],
+    diff_abn = diff[, coef_col]
   )
   
   out[, lfc_direction := ifelse(lfc > 0, "Higher in Peneira", "Higher in Floresta")]
