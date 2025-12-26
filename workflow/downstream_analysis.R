@@ -782,8 +782,9 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
     out[, lfc_direction := ifelse(lfc > 0,
                                   paste0("Higher in ", other_level),
                                   paste0("Higher in ", baseline_level))]
-    
-    setorder(out, q_val, p_val, -abs(lfc), genus)
+  
+    out[, abs_lfc := abs(lfc)]
+    data.table::setorder(out, q_val, p_val, -abs_lfc, genus)
     
     # write results table
     #tables -> TABLES_DIR and dynamic filename with actual levels
