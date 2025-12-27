@@ -30,7 +30,7 @@ infile  <- args[1]
 outdir  <- args[2]
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
-### NEW/CHANGED ### global output roots (always under results/)
+#global output roots (always under results/)
 RESULTS_ROOT <- dirname(outdir)  # assumes outdir is inside results/...
 TABLES_DIR   <- file.path(RESULTS_ROOT, "tables")
 PLOTS_DIR    <- file.path(RESULTS_ROOT, "plots")
@@ -101,10 +101,34 @@ merge_batches_if_needed <- function(infile) {
 # ==========================================================
 # Helpers: extract environment + code/replicate
 # ==========================================================
+
+#canonicalize/normalize sample IDs BEFORE any downstream logic
+### - forces LO1/IO1/O1 etc -> L01
+### - forces LO2/IO2/O2 etc -> L02
+### - also uppercases and trims spaces
+normalize_file_id <- function(x) {
+  x <- toupper(trimws(x))
+  # common OCR/typing confusions: O vs 0, I vs 1
+  # 1) make sure "L O 1" style becomes "L01"
+  x <- gsub("LO([0-9])", "L0\\1", x)  # LO1 -> L01
+  x <- gsub("IO([0-9])", "L0\\1", x)  # IO1 -> L01 (seen in your rules)
+  x <- gsub("L0I", "L01", x)          # L0I -> L01
+  x <- gsub("L0O", "L00", x)          # L0O -> L00 (rare, but keeps consistency)
+  
+  # 2) global: O<digit> -> 0<digit> (but only when directly followed by digit)
+  x <- gsub("O([0-9])", "0\\1", x)
+  
+  # 3) optional safety: if something like "L1_" appears, standardize to "L01_"
+  x <- gsub("\\bL1_", "L01_", x)
+  x <- gsub("\\bL2_", "L02_", x)
+  
+  x
+}
+
 add_code_replicate <- function(dt) {
   stopifnot("file" %in% names(dt))
   
-  dt[, file_norm := toupper(file)]
+  dt[, file_norm := toupper(file)]  # file is already normalized in read_and_shape()
   
   # replicate token: _I_ or _II_ or _III_
   dt[, replicate := str_match(file_norm, "_(I|II|III)_")[, 2]]
@@ -127,10 +151,7 @@ add_code_replicate <- function(dt) {
 add_environment <- function(dt) {
   stopifnot("file" %in% names(dt))
   
-  dt[, file_norm := toupper(file)]
-  dt[, file_norm := gsub("LO([0-9])", "L0\\1", file_norm)]
-  dt[, file_norm := gsub("IO([0-9])", "L0\\1", file_norm)]
-  dt[, file_norm := gsub("O([0-9])", "0\\1", file_norm)]
+  dt[, file_norm := toupper(file)]  # file is already normalized in read_and_shape()
   
   dt[, environment := NA_character_]
   
@@ -160,8 +181,12 @@ read_and_shape <- function(path){
   if ("estimated counts" %in% names(dt)) setnames(dt, "estimated counts", "estimated_counts")
   if (!"file" %in% names(dt)) stop("Input must contain 'file' column")
   
+  # keep original file, then normalize file IDs BEFORE anything else
+  dt[, file_raw := file]
+  dt[, file := normalize_file_id(file)]
+  
   BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.trimmed.filtered"
-  dt <- dt[file != BAD_FILE]
+  dt <- dt[file != BAD_FILE]  # compare on normalized ids
   
   dt <- add_environment(dt)
   dt <- add_code_replicate(dt)
@@ -356,7 +381,6 @@ step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_
   # CLR table source for concordance
   clr_obj <- make_genus_clr_steps(dt_raw, use_counts = USE_COUNTS_5)
   
-  
   fwrite(
     clr_obj$table,
     file = file.path(TABLES_DIR, paste0(prefix, "_genus_clr_steps.tsv")),
@@ -365,7 +389,6 @@ step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_
   
   dt_stage <- copy(dt_raw)
   if ("value" %in% names(dt_stage)) dt_stage[, value := NULL]
-  
   
   fwrite(
     dt_stage,
@@ -508,7 +531,7 @@ step4_beta_stats <- function(bray, meta, outdir, prefix, TABLES_DIR) {
   
   fwrite(as.data.table(bd_anova, keep.rownames = "term"),
          file = file.path(TABLES_DIR, paste0(prefix, "_beta_betadisper_anova.tsv")), sep = "\t")
-
+  
   fwrite(as.data.table(bd_perm_df, keep.rownames = "term"),
          file = file.path(TABLES_DIR, paste0(prefix, "_beta_betadisper_permutest.tsv")), sep = "\t")
 }
@@ -580,7 +603,6 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_D
     ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter.pdf")),
            p, width = 5.2, height = 4.2)
     
-    
     fwrite(
       df_out[, .(pairing_code, replicate, genus,
                  file_peneira, file_floresta, floresta_partner,
@@ -595,12 +617,7 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_D
 
 # ==========================================================
 # STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ
-#   - saves raw res to TABLES_DIR
-#   - saves volcano to PLOTS_DIR
-#   - can handle *one-row-per-taxon* table with columns like:
-#          lfc_env_groupPeneira, se_env_groupPeneira, p_env_groupPeneira, q_env_groupPeneira, etc.
 # ==========================================================
-#added TABLES_DIR + PLOTS_DIR args; regex-based extraction; correct direction labeling
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR) {
   
   value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
@@ -635,7 +652,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   meta_df <- as.data.frame(wide[, .(file, environment)])
   colnames(meta_df)[colnames(meta_df) == "environment"] <- "env_group"
   
-  #set baseline explicitly: Floresta is reference; coefficient is Peneira vs Floresta
+  # set baseline explicitly: Floresta is reference; coefficient is Peneira vs Floresta
   meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
   
   rownames(meta_df) <- meta_df$file
@@ -660,7 +677,7 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   )
   
   message(">>> Step 7: phyloseq built. taxa=", ntaxa(ps), " samples=", nsamples(ps))
-  message(">>> Step 7: sample vars in phyloseq = ", paste(colnames(as(sample_data(ps), "data.frame")), collapse = ","))
+  message(">>> Step 7: sample vars in phyloseq = ", paste(colnames(as(sample_data(ps), "data.frame")), collapse = ", "))
   
   # call ancombc2
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
@@ -681,30 +698,18 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   )
   
   # =========================
-  # Save raw result object + (if available) its primary table(s)
+  # Save raw result object + full table
   # =========================
-  
   save_prefix <- paste0(prefix, "_ancombc2_raw")
   saveRDS(res, file = file.path(TABLES_DIR, paste0(save_prefix, ".rds")))
   message(">>> Saved ANCOMBC2 res object to: ", file.path(TABLES_DIR, paste0(save_prefix, ".rds")))
   
-  # =========================
-  # Extract results robustly:
-  # Preferred case (your observed output): a single table with columns like
-  #   taxon, lfc_env_groupPeneira, se_env_groupPeneira, W_env_groupPeneira,
-  #   p_env_groupPeneira, q_env_groupPeneira, diff_env_groupPeneira,
-  #   diff_robust_env_groupPeneira, passed_ss_env_groupPeneira
-  # =========================
-  
   res_tbl <- if (!is.null(res$res)) res$res else res
   
-  # We'll handle matrix-style below; but if res_tbl exists, we will use it.
   if (!is.null(res_tbl)) {
     res_dt <- data.table::as.data.table(res_tbl)
     
-    # ensure 'taxon' column exists (or rownames)
     if (!"taxon" %in% names(res_dt)) {
-      # fallback: first column might be taxa, or rownames
       if (nrow(res_dt) > 0 && !is.null(rownames(res_tbl))) {
         res_dt[, taxon := rownames(res_tbl)]
       } else {
@@ -712,19 +717,12 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
       }
     }
     
-    # Save the full table for debugging / provenance
-    
     fwrite(res_dt, file = file.path(TABLES_DIR, paste0(prefix, "_ancombc2_full_table.tsv")), sep = "\t")
     
-    # figure out baseline/other from factor levels
     lvl <- levels(meta_df$env_group)
     baseline_level <- lvl[1]
     other_level    <- lvl[2]
     message(">>> Step 7: baseline = ", baseline_level, " ; coefficient level = ", other_level)
-    
-    # Build regex patterns that adapt to group name (e.g., Peneira)
-    # We want: lfc_env_group<OTHER>, se_env_group<OTHER>, ...
-    # Also tolerate underscores or parentheses variants.
     
     esc_other <- gsub("([^A-Za-z0-9])", "\\\\\\1", other_level)
     pat_lfc   <- paste0("^lfc_.*", esc_other, "$")
@@ -778,21 +776,17 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
       passed_ss    = if (!is.na(col_pss))  as.integer(res_dt[[col_pss]])  else NA_integer_
     )
     
-    #direction labels reflect baseline vs other
     out[, lfc_direction := ifelse(lfc > 0,
                                   paste0("Higher in ", other_level),
                                   paste0("Higher in ", baseline_level))]
-  
+    
     out[, abs_lfc := abs(lfc)]
     data.table::setorder(out, q_val, p_val, -abs_lfc, genus)
     
-    # write results table
-    #tables -> TABLES_DIR and dynamic filename with actual levels
     out_tsv <- file.path(TABLES_DIR, paste0(prefix, "_ancombc2_genus_", baseline_level, "_vs_", other_level, ".tsv"))
     fwrite(out, file = out_tsv, sep = "\t")
     message(">>> Step 7: wrote ANCOM-BC2 summary table: ", out_tsv)
     
-    # volcano plot
     out[, neglog10_q := -log10(pmax(q_val, 1e-300))]
     out[, significance := ifelse(q_val < 0.05, "q < 0.05", "ns")]
     
@@ -810,7 +804,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
       theme_classic(base_size = 12) +
       theme(legend.position = "bottom")
     
-    #plots -> PLOTS_DIR and dynamic filename
     out_png <- file.path(PLOTS_DIR, paste0(prefix, "_ancombc2_genus_", baseline_level, "_vs_", other_level, ".png"))
     ggsave(out_png, p, width = 6, height = 5, dpi = 300)
     
@@ -819,7 +812,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
     return(invisible(out))
   }
   
-  # If we reach here: no single "full table" detected; fallback to your older matrix-style extraction
   stop("Step 7: Could not locate a single ANCOM-BC2 results table in the returned object. (You should still have the saved .rds in TABLES_DIR to inspect.)")
 }
 
