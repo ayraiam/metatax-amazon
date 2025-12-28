@@ -185,8 +185,34 @@ read_and_shape <- function(path){
   dt[, file_raw := file]
   dt[, file := normalize_file_id(file)]
   
-  BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.trimmed.filtered"
-  dt <- dt[file != BAD_FILE]  # compare on normalized ids
+  # ==========================================================
+  # Quick debug + robust BAD_FILE exclusion (Option A)
+  # ==========================================================
+  BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.trimmed.filtered"   # original token
+  BAD_FILE_NORM <- normalize_file_id(BAD_FILE)                          
+  
+  message(">>> BAD_FILE (raw)  = ", BAD_FILE)                           
+  message(">>> BAD_FILE (norm) = ", BAD_FILE_NORM)                      
+  message(">>> Any exact match in file?  ", any(dt$file == BAD_FILE))   
+  message(">>> Any substring match in file? ", any(str_detect(dt$file, fixed(BAD_FILE_NORM))))  
+  message(">>> Any substring match in file_raw? ", any(str_detect(toupper(dt$file_raw), fixed(toupper(BAD_FILE))))) 
+  
+  message(">>> Examples containing '3050_II' (from file):")             
+  ex <- unique(dt$file[str_detect(dt$file, "3050_II")])                 
+  if (length(ex) == 0) {
+    message(">>>   (none found)")                                      
+  } else {
+    print(head(ex, 10))                                                
+  }
+  
+  n_before <- nrow(dt)                                                 
+  dt <- dt[
+    !str_detect(file, fixed(BAD_FILE_NORM)) &
+      !str_detect(toupper(file_raw), fixed(toupper(BAD_FILE)))
+  ]                                                                    
+  n_after <- nrow(dt)                                                  
+  message(">>> BAD_FILE exclusion removed rows: ", n_before - n_after)  
+  # ==========================================================
   
   dt <- add_environment(dt)
   dt <- add_code_replicate(dt)
@@ -435,10 +461,11 @@ step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR) {
 }
 
 # ==========================================================
-# STEP 2: Alpha diversity
+# STEP 2: Alpha diversity (Shannon & Simpson only)
+# (Function version of your previous Step 2 block)
 # ==========================================================
-#added TABLES_DIR arg; write tables into results/tables
-step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR) {
+step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
+  # ---- compute relative abundance matrix ----
   mx_rel  <- build_matrix(dt_raw, "genus", value_col = VAL_0_4)
   mat_rel <- mx_rel$mat
   meta    <- mx_rel$meta
@@ -446,21 +473,163 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR) {
   row_sums <- rowSums(mat_rel, na.rm = TRUE); row_sums[row_sums == 0] <- 1
   rel <- sweep(mat_rel, 1, row_sums, "/")
   
+  # ---- alpha metrics ----
   shannon <- vegan::diversity(rel, index = "shannon")
   simpson <- vegan::diversity(rel, index = "simpson")
   
-  alpha_df <- data.table(
+  alpha_df <- data.table::data.table(
     file    = rownames(mat_rel),
     Shannon = as.numeric(shannon),
     Simpson = as.numeric(simpson)
   )
   alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
   
-  alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
+  alpha_df[, environment := factor(
+    environment,
+    levels = c("Campina", "Floresta", "Igarape", "Peneira")
+  )]
   
-  fwrite(alpha_df, file = file.path(TABLES_DIR, paste0(prefix, "_alpha_diversity.tsv")), sep = "\t")
+  # ---- write tables (now to TABLES_DIR) ----
+  data.table::fwrite(
+    alpha_df,
+    file = file.path(TABLES_DIR, paste0(prefix, "_alpha_diversity.tsv")),
+    sep  = "\t"
+  )
   
-  # (keeping your existing plotting/stat code as-is)
+  # ---- helpers (kept exactly as your step 2) ----
+  pairwise_wilcox <- function(df, value_col, metric_name) {
+    df <- df[!is.na(environment) & !is.na(get(value_col))]
+    envs <- levels(df$environment)
+    envs <- envs[envs %in% unique(df$environment)]
+    if (length(envs) < 2) {
+      return(data.table(env1 = character(0), env2 = character(0),
+                        metric = character(0), p_value = numeric(0)))
+    }
+    
+    cmb <- t(combn(envs, 2))
+    res_list <- apply(cmb, 1, function(pair_env) {
+      e1 <- pair_env[1]; e2 <- pair_env[2]
+      x <- df[environment == e1][[value_col]]
+      y <- df[environment == e2][[value_col]]
+      p <- tryCatch(
+        wilcox.test(x, y)$p.value,
+        error = function(e) NA_real_
+      )
+      data.table(env1 = e1, env2 = e2, metric = metric_name, p_value = p)
+    })
+    rbindlist(res_list)
+  }
+  
+  pval_to_stars <- function(p) {
+    ifelse(p < 0.001, "***",
+           ifelse(p < 0.01, "**",
+                  ifelse(p < 0.05, "*", "ns")
+           )
+    )
+  }
+  
+  build_sig_df <- function(sig_pw, df, value_col) {
+    if (nrow(sig_pw) == 0) return(NULL)
+    
+    env_levels <- levels(df$environment)
+    rng <- range(df[[value_col]], na.rm = TRUE)
+    y_min <- rng[1]; y_max <- rng[2]
+    y_step <- 0.05 * (y_max - y_min)
+    if (is.na(y_step) || y_step == 0) y_step <- 0.1
+    
+    sig_pw <- copy(sig_pw)[order(p_value)]
+    sig_pw[, idx := seq_len(.N)]
+    sig_pw[, `:=`(
+      x    = match(env1, env_levels),
+      xend = match(env2, env_levels),
+      y    = y_max + idx * y_step,
+      label = pval_to_stars(p_value)
+    )]
+    sig_pw
+  }
+  
+  # ---- pairwise tests ----
+  pw_shannon <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
+  pw_simpson <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
+  pw_all <- rbind(pw_shannon, pw_simpson)
+  
+  fwrite(
+    pw_all,
+    file = file.path(TABLES_DIR, paste0(prefix, "_alpha_pairwise_wilcox.tsv")),
+    sep  = "\t"
+  )
+  
+  sig_shannon <- pw_shannon[!is.na(p_value) & p_value < 0.05]
+  sig_simpson <- pw_simpson[!is.na(p_value) & p_value < 0.05]
+  
+  sig_sh_df <- build_sig_df(sig_shannon, alpha_df, "Shannon")
+  sig_sp_df <- build_sig_df(sig_simpson, alpha_df, "Simpson")
+  
+  # ---- plots ----
+  theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
+  
+  env_colors <- c(
+    "Campina"  = "#FFCC00",
+    "Floresta" = "#99CC33",
+    "Igarape"  = "#3399FF",
+    "Peneira"  = "#FF9900"
+  )
+  
+  p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
+    geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
+    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
+                     alpha = 0.5, color = "black", show.legend = FALSE) +
+    geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
+    labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
+    scale_fill_manual(values = env_colors) +
+    scale_color_manual(values = env_colors) +
+    theme_base
+  
+  if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
+    p_sh <- p_sh +
+      geom_segment(
+        data = sig_sh_df,
+        aes(x = x, xend = xend, y = y, yend = y),
+        inherit.aes = FALSE
+      ) +
+      geom_text(
+        data = sig_sh_df,
+        aes(x = (x + xend) / 2, y = y, label = label),
+        vjust = -0.3, size = 3, inherit.aes = FALSE
+      )
+  }
+  
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_shannon_env.png")),
+         p_sh, width = 3, height = 5, dpi = 300)
+  
+  p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, color = environment)) +
+    geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
+    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
+                     alpha = 0.5, color = "black", show.legend = FALSE) +
+    geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
+    labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
+    scale_fill_manual(values = env_colors) +
+    scale_color_manual(values = env_colors) +
+    theme_base
+  
+  if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
+    p_sp <- p_sp +
+      geom_segment(
+        data = sig_sp_df,
+        aes(x = x, xend = xend, y = y, yend = y),
+        inherit.aes = FALSE
+      ) +
+      geom_text(
+        data = sig_sp_df,
+        aes(x = (x + xend) / 2, y = y, label = label),
+        vjust = -0.3, size = 3, inherit.aes = FALSE
+      )
+  }
+  
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_simpson_env.png")),
+         p_sp, width = 3, height = 5, dpi = 300)
+  
+  # return what downstream steps need
   list(rel = rel, meta = meta, alpha_df = alpha_df)
 }
 
@@ -619,7 +788,6 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_D
 # STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR) {
-  
   value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
   message(">>> Step 7 (ANCOM-BC2) value_col = ", value_col, " (driven by USE_COUNTS_0_4)")
   
