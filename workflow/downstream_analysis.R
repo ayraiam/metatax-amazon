@@ -7,7 +7,8 @@
 # 4) Beta diversity (Bray–Curtis PCoA, Genus)
 # 5) Beta-diversity stats: PERMANOVA + betadisper
 # 6) Per-code genus CLR concordance scatter plots (Peneira vs Floresta)
-# 7) Differential taxa (Floresta vs Peneira) via ANCOM-BC2
+# 7) Differential taxa (Floresta vs Peneira) via ANCOM-BC2 (L01 only)
+# 8) Differential taxa per code (Floresta CODE vs Peneira CODE) via ANCOM-BC2 (L01 only)
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -108,20 +109,13 @@ merge_batches_if_needed <- function(infile) {
 ### - also uppercases and trims spaces
 normalize_file_id <- function(x) {
   x <- toupper(trimws(x))
-  # common OCR/typing confusions: O vs 0, I vs 1
-  # 1) make sure "L O 1" style becomes "L01"
   x <- gsub("LO([0-9])", "L0\\1", x)  # LO1 -> L01
-  x <- gsub("IO([0-9])", "L0\\1", x)  # IO1 -> L01 (seen in your rules)
-  x <- gsub("L0I", "L01", x)          # L0I -> L01
-  x <- gsub("L0O", "L00", x)          # L0O -> L00 (rare, but keeps consistency)
-  
-  # 2) global: O<digit> -> 0<digit> (but only when directly followed by digit)
+  x <- gsub("IO([0-9])", "L0\\1", x)  # IO1 -> L01
+  x <- gsub("L0I", "L01", x)
+  x <- gsub("L0O", "L00", x)
   x <- gsub("O([0-9])", "0\\1", x)
-  
-  # 3) optional safety: if something like "L1_" appears, standardize to "L01_"
   x <- gsub("\\bL1_", "L01_", x)
   x <- gsub("\\bL2_", "L02_", x)
-  
   x
 }
 
@@ -142,7 +136,7 @@ add_code_replicate <- function(dt) {
   
   # pairing_code: PENEIRA_0500 pairs with Floresta 500
   dt[, pairing_code := code]
-  dt[file_norm %like% "^PENEIRA_0500_", pairing_code := "500"]
+  dt[file_norm %like% "^PENEIRA_0500_", pairing_code := "500"]  # (already correct)
   
   dt[, file_norm := NULL]
   dt
@@ -188,30 +182,30 @@ read_and_shape <- function(path){
   # ==========================================================
   # Quick debug + robust BAD_FILE exclusion (Option A)
   # ==========================================================
-  BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.trimmed.filtered"   # original token
-  BAD_FILE_NORM <- normalize_file_id(BAD_FILE)                          
+  BAD_FILE <- "L01_3050_II_ARCH_and_PENEIRA_3500_ITS.trimmed.filtered"
+  BAD_FILE_NORM <- normalize_file_id(BAD_FILE)
   
-  message(">>> BAD_FILE (raw)  = ", BAD_FILE)                           
-  message(">>> BAD_FILE (norm) = ", BAD_FILE_NORM)                      
-  message(">>> Any exact match in file?  ", any(dt$file == BAD_FILE))   
-  message(">>> Any substring match in file? ", any(str_detect(dt$file, fixed(BAD_FILE_NORM))))  
-  message(">>> Any substring match in file_raw? ", any(str_detect(toupper(dt$file_raw), fixed(toupper(BAD_FILE))))) 
+  message(">>> BAD_FILE (raw)  = ", BAD_FILE)
+  message(">>> BAD_FILE (norm) = ", BAD_FILE_NORM)
+  message(">>> Any exact match in file?  ", any(dt$file == BAD_FILE))
+  message(">>> Any substring match in file? ", any(str_detect(dt$file, fixed(BAD_FILE_NORM))))
+  message(">>> Any substring match in file_raw? ", any(str_detect(toupper(dt$file_raw), fixed(toupper(BAD_FILE)))))
   
-  message(">>> Examples containing '3050_II' (from file):")             
-  ex <- unique(dt$file[str_detect(dt$file, "3050_II")])                 
+  message(">>> Examples containing '3050_II' (from file):")
+  ex <- unique(dt$file[str_detect(dt$file, "3050_II")])
   if (length(ex) == 0) {
-    message(">>>   (none found)")                                      
+    message(">>>   (none found)")
   } else {
-    print(head(ex, 10))                                                
+    print(head(ex, 10))
   }
   
-  n_before <- nrow(dt)                                                 
+  n_before <- nrow(dt)
   dt <- dt[
     !str_detect(file, fixed(BAD_FILE_NORM)) &
       !str_detect(toupper(file_raw), fixed(toupper(BAD_FILE)))
-  ]                                                                    
-  n_after <- nrow(dt)                                                  
-  message(">>> BAD_FILE exclusion removed rows: ", n_before - n_after)  
+  ]
+  n_after <- nrow(dt)
+  message(">>> BAD_FILE exclusion removed rows: ", n_before - n_after)
   # ==========================================================
   
   dt <- add_environment(dt)
@@ -395,16 +389,13 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
 # ==========================================================
 # STEP 0: Read + stage
 # ==========================================================
-#added TABLES_DIR arg; write tables into results/tables
 step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR) {
   read_obj <- read_and_shape(infile)
   dt_raw   <- read_obj$raw
   
-  # Parts 1–4 numeric column
   VAL_0_4 <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
   message(">>> Parts 1–4 value_col = ", VAL_0_4)
   
-  # CLR table source for concordance
   clr_obj <- make_genus_clr_steps(dt_raw, use_counts = USE_COUNTS_5)
   
   fwrite(
@@ -428,18 +419,15 @@ step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_
 # ==========================================================
 # STEP 1: Stacked bars
 # ==========================================================
-#added PLOTS_DIR arg; write plots into results/plots
 step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR) {
   p_family <- make_env_stacks(
     dt_raw, "family",
-    
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.png")),
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.pdf")),
     N = 20, title_rank = "Family", value_col = VAL_0_4
   )
   p_genus <- make_env_stacks(
     dt_raw, "genus",
-    
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.png")),
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.pdf")),
     N = 20, title_rank = "Genus", value_col = VAL_0_4
@@ -447,25 +435,17 @@ step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR) {
   
   if (!is.null(p_family) && !is.null(p_genus)) {
     combined <- plot_grid(p_family, p_genus, ncol = 1, rel_heights = c(1, 1), align = "v")
-    ggsave(
-      
-      file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.png")),
-      combined, width = 22, height = 10, dpi = 300
-    )
-    ggsave(
-      
-      file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.pdf")),
-      combined, width = 22, height = 10
-    )
+    ggsave(file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.png")),
+           combined, width = 22, height = 10, dpi = 300)
+    ggsave(file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.pdf")),
+           combined, width = 22, height = 10)
   }
 }
 
 # ==========================================================
 # STEP 2: Alpha diversity (Shannon & Simpson only)
-# (Function version of your previous Step 2 block)
 # ==========================================================
 step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
-  # ---- compute relative abundance matrix ----
   mx_rel  <- build_matrix(dt_raw, "genus", value_col = VAL_0_4)
   mat_rel <- mx_rel$mat
   meta    <- mx_rel$meta
@@ -473,7 +453,6 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   row_sums <- rowSums(mat_rel, na.rm = TRUE); row_sums[row_sums == 0] <- 1
   rel <- sweep(mat_rel, 1, row_sums, "/")
   
-  # ---- alpha metrics ----
   shannon <- vegan::diversity(rel, index = "shannon")
   simpson <- vegan::diversity(rel, index = "simpson")
   
@@ -484,19 +463,11 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   )
   alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
   
-  alpha_df[, environment := factor(
-    environment,
-    levels = c("Campina", "Floresta", "Igarape", "Peneira")
-  )]
+  alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
   
-  # ---- write tables (now to TABLES_DIR) ----
-  data.table::fwrite(
-    alpha_df,
-    file = file.path(TABLES_DIR, paste0(prefix, "_alpha_diversity.tsv")),
-    sep  = "\t"
-  )
+  data.table::fwrite(alpha_df, file = file.path(TABLES_DIR, paste0(prefix, "_alpha_diversity.tsv")), sep  = "\t")
   
-  # ---- helpers (kept exactly as your step 2) ----
+  # ---- pairwise tests + plots (unchanged) ----
   pairwise_wilcox <- function(df, value_col, metric_name) {
     df <- df[!is.na(environment) & !is.na(get(value_col))]
     envs <- levels(df$environment)
@@ -511,10 +482,7 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
       e1 <- pair_env[1]; e2 <- pair_env[2]
       x <- df[environment == e1][[value_col]]
       y <- df[environment == e2][[value_col]]
-      p <- tryCatch(
-        wilcox.test(x, y)$p.value,
-        error = function(e) NA_real_
-      )
+      p <- tryCatch(wilcox.test(x, y)$p.value, error = function(e) NA_real_)
       data.table(env1 = e1, env2 = e2, metric = metric_name, p_value = p)
     })
     rbindlist(res_list)
@@ -523,9 +491,7 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   pval_to_stars <- function(p) {
     ifelse(p < 0.001, "***",
            ifelse(p < 0.01, "**",
-                  ifelse(p < 0.05, "*", "ns")
-           )
-    )
+                  ifelse(p < 0.05, "*", "ns")))
   }
   
   build_sig_df <- function(sig_pw, df, value_col) {
@@ -548,16 +514,11 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
     sig_pw
   }
   
-  # ---- pairwise tests ----
   pw_shannon <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
   pw_simpson <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
   pw_all <- rbind(pw_shannon, pw_simpson)
   
-  fwrite(
-    pw_all,
-    file = file.path(TABLES_DIR, paste0(prefix, "_alpha_pairwise_wilcox.tsv")),
-    sep  = "\t"
-  )
+  fwrite(pw_all, file = file.path(TABLES_DIR, paste0(prefix, "_alpha_pairwise_wilcox.tsv")), sep = "\t")
   
   sig_shannon <- pw_shannon[!is.na(p_value) & p_value < 0.05]
   sig_simpson <- pw_simpson[!is.na(p_value) & p_value < 0.05]
@@ -565,7 +526,6 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   sig_sh_df <- build_sig_df(sig_shannon, alpha_df, "Shannon")
   sig_sp_df <- build_sig_df(sig_simpson, alpha_df, "Simpson")
   
-  # ---- plots ----
   theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
   
   env_colors <- c(
@@ -577,8 +537,7 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   
   p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
     geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
-                     alpha = 0.5, color = "black", show.legend = FALSE) +
+    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, alpha = 0.5, color = "black", show.legend = FALSE) +
     geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
     labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
     scale_fill_manual(values = env_colors) +
@@ -587,25 +546,16 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   
   if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
     p_sh <- p_sh +
-      geom_segment(
-        data = sig_sh_df,
-        aes(x = x, xend = xend, y = y, yend = y),
-        inherit.aes = FALSE
-      ) +
-      geom_text(
-        data = sig_sh_df,
-        aes(x = (x + xend) / 2, y = y, label = label),
-        vjust = -0.3, size = 3, inherit.aes = FALSE
-      )
+      geom_segment(data = sig_sh_df, aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE) +
+      geom_text(data = sig_sh_df, aes(x = (x + xend) / 2, y = y, label = label),
+                vjust = -0.3, size = 3, inherit.aes = FALSE)
   }
   
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_shannon_env.png")),
-         p_sh, width = 3, height = 5, dpi = 300)
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_shannon_env.png")), p_sh, width = 3, height = 5, dpi = 300)
   
   p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, color = environment)) +
     geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75,
-                     alpha = 0.5, color = "black", show.legend = FALSE) +
+    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, alpha = 0.5, color = "black", show.legend = FALSE) +
     geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
     labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
     scale_fill_manual(values = env_colors) +
@@ -614,29 +564,19 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   
   if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
     p_sp <- p_sp +
-      geom_segment(
-        data = sig_sp_df,
-        aes(x = x, xend = xend, y = y, yend = y),
-        inherit.aes = FALSE
-      ) +
-      geom_text(
-        data = sig_sp_df,
-        aes(x = (x + xend) / 2, y = y, label = label),
-        vjust = -0.3, size = 3, inherit.aes = FALSE
-      )
+      geom_segment(data = sig_sp_df, aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE) +
+      geom_text(data = sig_sp_df, aes(x = (x + xend) / 2, y = y, label = label),
+                vjust = -0.3, size = 3, inherit.aes = FALSE)
   }
   
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_simpson_env.png")),
-         p_sp, width = 3, height = 5, dpi = 300)
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_simpson_env.png")), p_sp, width = 3, height = 5, dpi = 300)
   
-  # return what downstream steps need
   list(rel = rel, meta = meta, alpha_df = alpha_df)
 }
 
 # ==========================================================
 # STEP 3: Beta diversity PCoA
 # ==========================================================
-#added TABLES_DIR + PLOTS_DIR args; write outputs to results/tables + results/plots
 step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
   env_colors <- c(
     "Campina"  = "#FFCC00",
@@ -670,11 +610,7 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
     labs(x = pc1_lab, y = pc2_lab, title = "") +
     theme_base
   
-  ggsave(
-    
-    file.path(PLOTS_DIR, paste0(prefix, "_pcoa_braycurtis_env.png")),
-    p_pcoa, width = 5, height = 4, dpi = 300
-  )
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_pcoa_braycurtis_env.png")), p_pcoa, width = 5, height = 4, dpi = 300)
   
   list(bray = bray)
 }
@@ -682,7 +618,6 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
 # ==========================================================
 # STEP 4: Beta stats
 # ==========================================================
-#added TABLES_DIR arg; write outputs to results/tables
 step4_beta_stats <- function(bray, meta, outdir, prefix, TABLES_DIR) {
   set.seed(2025)
   meta$environment <- factor(meta$environment)
@@ -708,7 +643,6 @@ step4_beta_stats <- function(bray, meta, outdir, prefix, TABLES_DIR) {
 # ==========================================================
 # STEP 5: Concordance scatter
 # ==========================================================
-#added TABLES_DIR + PLOTS_DIR; plots -> results/plots; paired tables -> results/tables
 step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR) {
   clr_tbl <- copy(clr_obj$table)
   
@@ -749,10 +683,8 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_D
     df[, deltaCLR := CLR_Peneira - CLR_Floresta]
     df[, abs_deltaCLR := abs(deltaCLR)]
     
-    # sort by abs_deltaCLR before saving
     df_out <- df[order(-abs_deltaCLR, genus, replicate, file_peneira, file_floresta)]
     
-    # Pearson correlation
     ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
     r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
     
@@ -786,6 +718,7 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_D
 
 # ==========================================================
 # STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ
+#   #L01-only Floresta, keep Peneira; exclude L02 entirely
 # ==========================================================
 step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR) {
   value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
@@ -804,9 +737,16 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   pkg <- if (requireNamespace("ANCOMBC", quietly = TRUE)) "ANCOMBC" else "ancombc"
   message(">>> Using ANCOM-BC2 package namespace: ", pkg)
   
-  # keep only Floresta vs Peneira
+  # keep only Floresta vs Peneira + numeric finite
   dt2 <- data.table::copy(dt_raw)[environment %in% c("Floresta", "Peneira")]
   dt2 <- dt2[is.finite(get(value_col))]
+  
+  #enforce L01-only for Floresta; keep all Peneira; drop all L02
+  dt2 <- dt2[
+    (environment == "Floresta" & grepl("^L01_", file)) |
+      (environment == "Peneira"  & grepl("^PENEIRA_", file))
+  ]
+  message(">>> Step 7: after L01-only Floresta filter: samples=", length(unique(dt2$file)))
   
   # aggregate to genus per sample
   gen_long <- dt2[, .(val = sum(get(value_col), na.rm = TRUE)),
@@ -820,7 +760,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   meta_df <- as.data.frame(wide[, .(file, environment)])
   colnames(meta_df)[colnames(meta_df) == "environment"] <- "env_group"
   
-  # set baseline explicitly: Floresta is reference; coefficient is Peneira vs Floresta
   meta_df$env_group <- factor(meta_df$env_group, levels = c("Floresta", "Peneira"))
   
   rownames(meta_df) <- meta_df$file
@@ -832,13 +771,11 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   otu <- t(mat)  # taxa x samples
   storage.mode(otu) <- "numeric"
   
-  # Align sample names explicitly
   common <- intersect(colnames(otu), rownames(meta_df))
   if (length(common) < 2) stop(">>> Step 7 ERROR: too few common samples between otu and meta.")
   otu <- otu[, common, drop = FALSE]
   meta_df <- meta_df[common, , drop = FALSE]
   
-  # build phyloseq object
   ps <- phyloseq(
     otu_table(otu, taxa_are_rows = TRUE),
     sample_data(meta_df)
@@ -847,7 +784,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
   message(">>> Step 7: phyloseq built. taxa=", ntaxa(ps), " samples=", nsamples(ps))
   message(">>> Step 7: sample vars in phyloseq = ", paste(colnames(as(sample_data(ps), "data.frame")), collapse = ", "))
   
-  # call ancombc2
   ancombc2_fun <- get("ancombc2", envir = asNamespace(pkg))
   
   res <- ancombc2_fun(
@@ -865,9 +801,6 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
     verbose = TRUE
   )
   
-  # =========================
-  # Save raw result object + full table
-  # =========================
   save_prefix <- paste0(prefix, "_ancombc2_raw")
   saveRDS(res, file = file.path(TABLES_DIR, paste0(save_prefix, ".rds")))
   message(">>> Saved ANCOMBC2 res object to: ", file.path(TABLES_DIR, paste0(save_prefix, ".rds")))
@@ -984,6 +917,55 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
 }
 
 # ==========================================================
+# STEP 8: Differential taxa per pairing_code (ANCOM-BC2)
+#   #L01-only Floresta, keep Peneira; drop L02
+# ==========================================================
+step8_ancombc2_by_code <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR,
+                                   target_codes = c("500", "1500", "2500", "3500", "4500")) {
+  
+  if (!"pairing_code" %in% names(dt_raw)) {
+    stop(">>> Step 8 ERROR: dt_raw has no 'pairing_code' column. (Check add_code_replicate())")
+  }
+  
+  dt_raw[, pairing_code := as.character(pairing_code)]
+  
+  message(">>> Step 8: Running ANCOM-BC2 per code: ", paste(target_codes, collapse = ", "))
+  
+  for (cc in target_codes) {
+    
+    dt_cc <- data.table::copy(dt_raw)[environment %in% c("Floresta", "Peneira") & pairing_code == cc]
+    
+    #enforce L01-only for Floresta; keep all Peneira; drop all L02
+    dt_cc <- dt_cc[
+      (environment == "Floresta" & grepl("^L01_", file)) |
+        (environment == "Peneira"  & grepl("^PENEIRA_", file))
+    ]
+    
+    n_samp <- length(unique(dt_cc$file))
+    n_env  <- length(unique(dt_cc$environment))
+    if (n_samp < 4 || n_env < 2) {
+      message(">>> Step 8: code=", cc, " skipped (samples=", n_samp, ", env_groups=", n_env, ")")
+      next
+    }
+    
+    prefix_cc <- paste0(prefix, "_code_", cc)
+    
+    message(">>> Step 8: code=", cc, " -> running ANCOM-BC2 with prefix: ", prefix_cc)
+    
+    step7_ancombc2(
+      dt_raw = dt_cc,
+      outdir = outdir,
+      prefix = prefix_cc,
+      USE_COUNTS_0_4 = USE_COUNTS_0_4,
+      TABLES_DIR = TABLES_DIR,
+      PLOTS_DIR = PLOTS_DIR
+    )
+  }
+  
+  message(">>> Step 8: done.")
+}
+
+# ==========================================================
 # Calling functions
 # ==========================================================
 merge_batches_if_needed(infile)
@@ -995,7 +977,7 @@ clr_obj <- obj0$clr_obj
 
 step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
 
-obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR)
+obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
 rel  <- obj2$rel
 meta <- obj2$meta
 
@@ -1007,6 +989,8 @@ step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
 step5_concordance(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
 
 step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR)
+
+step8_ancombc2_by_code(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR)
 
 message(">>> Done. Outputs in:")
 message(">>>   tables: ", TABLES_DIR)
