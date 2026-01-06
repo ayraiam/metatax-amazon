@@ -802,6 +802,296 @@ step9_heatmap_ancom_sig <- function(dt_raw, ancom_out, outdir, prefix, USE_COUNT
 }
 
 # ==========================================================
+# STEP 10: Real phylogeny tree (Open Tree of Life) + tip icons
+#   - builds an induced subtree from OTL using genus names
+#   - tip icons:
+#       * genera selected from ANCOM-BC2 "res" summary: color by LFC (continuous)
+#       * genera selected from ANCOM-BC2 "zero_ind": binary presence/absence category
+# ==========================================================
+step10_otl_phylogeny_lfc_zeroind <- function(
+    res7_summary,              # data.table from step7_ancombc2() return (genus, lfc, q_val, abs_lfc, ...)
+    ancombc2_raw_rds,          # path to prefix_ancombc2_raw.rds saved by step7_ancombc2
+    outdir, prefix,
+    PLOTS_DIR, TABLES_DIR,
+    q_cut = 0.05,
+    top_n_each_dir = 10,
+    zero_n_each_dir = 10,
+    seed = 1,
+    use_only_qsig_for_top = TRUE,   # if TRUE, top lists are q<q_cut; if none pass, falls back to smallest q
+    min_unique_tips = 8
+) {
+  #No runtime installs on HPC; require packages instead
+  if (!requireNamespace("rotl", quietly = TRUE)) {
+    stop("Missing R package 'rotl'. Install it in the downstream env before running Step 10.")
+  }
+  if (!requireNamespace("ape", quietly = TRUE)) {
+    stop("Missing R package 'ape'. Install it in the downstream env before running Step 10.")
+  }
+  suppressPackageStartupMessages({
+    library(rotl)
+    library(ape)
+  })
+  
+  if (is.null(res7_summary) || nrow(res7_summary) == 0) {
+    message(">>> Step 10: res7_summary is empty; skipping phylogeny plot.")
+    return(invisible(NULL))
+  }
+  if (!file.exists(ancombc2_raw_rds)) {
+    stop(">>> Step 10: ancombc2_raw_rds not found: ", ancombc2_raw_rds)
+  }
+  
+  # ---------- 1) pick genera from "res" summary ----------
+  res_dt <- data.table::as.data.table(res7_summary)
+  res_dt <- res_dt[is.finite(lfc) & is.finite(q_val)]
+  if (!"abs_lfc" %in% names(res_dt)) res_dt[, abs_lfc := abs(lfc)]
+  
+  # Prefer q-significant for top lists, but fall back if none
+  if (use_only_qsig_for_top) {
+    sig_only <- res_dt[q_val < q_cut]
+    if (nrow(sig_only) > 0) {
+      base_for_top <- sig_only
+    } else {
+      base_for_top <- res_dt  # fallback: smallest q
+    }
+  } else {
+    base_for_top <- res_dt
+  }
+  
+  top_peneira <- base_for_top[lfc > 0][order(q_val, -abs(lfc))][1:min(top_n_each_dir, .N)]
+  top_floresta <- base_for_top[lfc < 0][order(q_val, -abs(lfc))][1:min(top_n_each_dir, .N)]
+  
+  top_res <- data.table::rbindlist(list(top_peneira, top_floresta), use.names = TRUE, fill = TRUE)
+  top_res <- unique(top_res, by = "genus")
+  top_res[, source := "res"]
+  top_res[, icon_type := "lfc"]  # continuous
+  
+  # ---------- 2) pull "zero_ind" from raw ANCOM-BC2 object ----------
+  raw_obj <- readRDS(ancombc2_raw_rds)
+  
+  # Try multiple likely locations (depends on ANCOMBC/ancombc version)
+  zero_tbl <- NULL
+  if (is.list(raw_obj)) {
+    if (!is.null(raw_obj$zero_ind)) zero_tbl <- raw_obj$zero_ind
+    if (is.null(zero_tbl) && !is.null(raw_obj$res) && is.list(raw_obj$res) && !is.null(raw_obj$res$zero_ind)) zero_tbl <- raw_obj$res$zero_ind
+  }
+  
+  if (is.null(zero_tbl)) {
+    message(">>> Step 10: could not find 'zero_ind' inside the ANCOM-BC2 raw object. Skipping zero_ind sampling.")
+    zero_dt <- data.table::data.table()
+  } else {
+    zero_dt <- data.table::as.data.table(zero_tbl)
+    
+    # Standardize the taxon column name to "genus" if possible
+    if (!"genus" %in% names(zero_dt)) {
+      if ("taxon" %in% names(zero_dt)) {
+        data.table::setnames(zero_dt, "taxon", "genus")
+      } else if (nrow(zero_dt) > 0 && !is.null(rownames(zero_tbl))) {
+        zero_dt[, genus := rownames(zero_tbl)]
+      } else {
+        # last resort: assume first col is taxon
+        data.table::setnames(zero_dt, 1, "genus")
+      }
+    }
+  }
+  
+  # We need two groups from zero_ind:
+  #   - present in Peneira and NOT in Floresta
+  #   - present in Floresta and NOT in Peneira
+  #
+  # Because zero_ind schemas vary, we implement a robust "best-effort":
+  # - look for columns that include both group names and look binary (0/1 or TRUE/FALSE)
+  # - otherwise, skip with message
+  zero_pick <- data.table::data.table()
+  if (nrow(zero_dt) > 0) {
+    cn <- names(zero_dt)
+    
+    # Find candidate columns
+    # Examples seen in wild: "zero_ind_Floresta", "zero_ind_Peneira", "Floresta", "Peneira", etc.
+    pick_col <- function(group) {
+      hits <- grep(group, cn, ignore.case = TRUE, value = TRUE)
+      if (length(hits) == 0) return(NA_character_)
+      # prefer columns containing "zero" or "ind"
+      pref <- hits[grep("zero|ind", hits, ignore.case = TRUE)]
+      if (length(pref) > 0) return(pref[1])
+      hits[1]
+    }
+    
+    col_flo <- pick_col("Floresta")
+    col_pen <- pick_col("Peneira")
+    
+    if (is.na(col_flo) || is.na(col_pen)) {
+      message(">>> Step 10: zero_ind found but couldn't identify Floresta/Peneira indicator columns. Skipping zero_ind sampling.")
+    } else {
+      # Coerce to integer-ish 0/1 (TRUE/FALSE also ok)
+      z <- copy(zero_dt)
+      z[, flo := as.integer(as.logical(get(col_flo)) | get(col_flo) == 1)]
+      z[, pen := as.integer(as.logical(get(col_pen)) | get(col_pen) == 1)]
+      
+      # present in Peneira not in Floresta  => pen==1 & flo==0
+      pen_only <- z[pen == 1 & flo == 0]
+      # present in Floresta not in Peneira => flo==1 & pen==0
+      flo_only <- z[flo == 1 & pen == 0]
+      
+      set.seed(seed)
+      if (nrow(pen_only) > 0) pen_only <- pen_only[sample(.N, min(zero_n_each_dir, .N))]
+      if (nrow(flo_only) > 0) flo_only <- flo_only[sample(.N, min(zero_n_each_dir, .N))]
+      
+      zero_pick <- data.table::rbindlist(list(
+        pen_only[, .(genus, zero_class = "Peneira_only")],
+        flo_only[, .(genus, zero_class = "Floresta_only")]
+      ), use.names = TRUE, fill = TRUE)
+      
+      zero_pick <- unique(zero_pick, by = "genus")
+      zero_pick[, source := "zero_ind"]
+      zero_pick[, icon_type := "binary"]
+    }
+  }
+  
+  # ---------- 3) union of selected genera ----------
+  keep <- unique(c(top_res$genus, zero_pick$genus))
+  keep <- keep[is.finite(match(keep, keep))]  # drop NA if any
+  keep <- keep[keep != ""]
+  keep <- keep[!is.na(keep)]
+  
+  if (length(keep) < min_unique_tips) {
+    message(">>> Step 10: too few genera selected for phylogeny (n=", length(keep), "). Skipping.")
+    return(invisible(NULL))
+  }
+  
+  # ---------- 4) resolve to OTL IDs and induced subtree ----------
+  message(">>> Step 10: resolving genus names in OpenTree (tnrs_match_names)...")
+  # rotl expects vectors; this may return multiple matches; we take the best for each name
+  m <- rotl::tnrs_match_names(keep, do_approximate_matching = TRUE)
+  
+  # rotl returns a data.frame-like object; keep ott_id and unique name mapping
+  mdt <- data.table::as.data.table(m)
+  if (!all(c("search_string", "ott_id") %in% names(mdt))) {
+    stop(">>> Step 10: unexpected tnrs_match_names output; missing search_string/ott_id columns.")
+  }
+  mdt <- mdt[!is.na(ott_id)]
+  if (nrow(mdt) == 0) {
+    stop(">>> Step 10: none of the selected genera could be resolved in OpenTree.")
+  }
+  
+  # take first/best hit per search_string
+  mdt <- mdt[, .SD[1], by = search_string]
+  resolved_keep <- mdt$search_string
+  ott_ids <- mdt$ott_id
+  
+  if (length(ott_ids) < min_unique_tips) {
+    message(">>> Step 10: too few resolved genera in OpenTree (n=", length(ott_ids), "). Skipping.")
+    return(invisible(NULL))
+  }
+  
+  message(">>> Step 10: fetching induced subtree from OpenTree (tol_induced_subtree)...")
+  tr <- rotl::tol_induced_subtree(ott_ids = ott_ids)
+  
+  # The tree tips are ott IDs by default; replace with your genus labels
+  # Map tip labels to search_string where possible.
+  tip_map <- data.table::data.table(
+    tip_label = tr$tip.label
+  )
+  # Extract ott id from tip label like "ott12345" (rotl uses "ott####")
+  tip_map[, ott_id := suppressWarnings(as.integer(gsub("^ott", "", tip_label)))]
+  tip_map <- merge(tip_map, mdt[, .(search_string, ott_id)], by = "ott_id", all.x = TRUE)
+  
+  # fallback: keep original if unresolved
+  new_labels <- ifelse(is.na(tip_map$search_string), tip_map$tip_label, tip_map$search_string)
+  tr$tip.label <- new_labels
+  
+  # ---------- 5) build tip icon colors ----------
+  # Build a unified table with per-genus attributes
+  meta_tip <- data.table::data.table(genus = tr$tip.label)
+  
+  # LFC from res summary (for continuous coloring)
+  res_lfc <- res_dt[, .(genus, lfc, q_val)]
+  meta_tip <- merge(meta_tip, res_lfc, by = "genus", all.x = TRUE)
+  
+  # zero_ind class (binary)
+  if (nrow(zero_pick) > 0) {
+    meta_tip <- merge(meta_tip, zero_pick[, .(genus, zero_class)], by = "genus", all.x = TRUE)
+  } else {
+    meta_tip[, zero_class := NA_character_]
+  }
+  
+  # Define tip icon types:
+  # - if genus has lfc: continuous (filled circle colored by lfc)
+  # - else if genus has zero_class: binary (filled circle with two colors)
+  # - else: grey
+  meta_tip[, icon_group := fifelse(!is.na(lfc), "lfc",
+                                   fifelse(!is.na(zero_class), "binary", "other"))]
+  
+  # continuous palette for lfc
+  lfc_vals <- meta_tip[icon_group == "lfc", lfc]
+  if (length(lfc_vals) == 0) {
+    lfc_min <- -1; lfc_max <- 1
+  } else {
+    lfc_min <- min(lfc_vals, na.rm = TRUE)
+    lfc_max <- max(lfc_vals, na.rm = TRUE)
+    if (!is.finite(lfc_min) || !is.finite(lfc_max) || lfc_min == lfc_max) {
+      lfc_min <- -1; lfc_max <- 1
+    }
+  }
+  
+  # Map lfc to colors (no dependencies)
+  pal <- grDevices::colorRampPalette(c("blue3", "white", "red3"))
+  ncol <- 101
+  cols_lfc <- pal(ncol)
+  lfc_to_col <- function(x) {
+    if (!is.finite(x)) return("grey70")
+    t <- (x - lfc_min) / (lfc_max - lfc_min)
+    t <- max(0, min(1, t))
+    idx <- 1 + floor(t * (ncol - 1))
+    cols_lfc[idx]
+  }
+  
+  tip_cols <- rep("grey80", nrow(meta_tip))
+  tip_cols[meta_tip$icon_group == "lfc"] <- vapply(meta_tip[meta_tip$icon_group == "lfc", lfc], lfc_to_col, character(1))
+  
+  # binary colors for zero_ind classes
+  # (choose fixed colors; you can tweak later)
+  tip_cols[meta_tip$icon_group == "binary" & meta_tip$zero_class == "Peneira_only"]  <- "darkorange2"
+  tip_cols[meta_tip$icon_group == "binary" & meta_tip$zero_class == "Floresta_only"] <- "deepskyblue3"
+  
+  # ---------- 6) plot tree + tip icons ----------
+  out_png <- file.path(PLOTS_DIR, paste0(prefix, "_otol_tree_lfc_zeroind.png"))
+  out_pdf <- file.path(PLOTS_DIR, paste0(prefix, "_otol_tree_lfc_zeroind.pdf"))
+  
+  # Save a metadata table used for the plot (reproducibility)
+  data.table::fwrite(meta_tip, file.path(TABLES_DIR, paste0(prefix, "_otol_tree_tip_metadata.tsv")), sep = "\t")
+  
+  png(out_png, width = 1800, height = 1400, res = 150)
+  par(mar = c(2, 2, 2, 10))
+  ape::plot.phylo(tr, cex = 0.7, label.offset = 0.01, no.margin = TRUE)
+  ape::tiplabels(pch = 16, col = tip_cols, cex = 1.1)
+  title(main = paste0("OpenTree induced genus phylogeny | tip icons: LFC (res) + presence/absence (zero_ind)\n",
+                      "LFC range: [", signif(lfc_min, 3), ", ", signif(lfc_max, 3), "]"))
+  # small legend
+  legend("topleft",
+         legend = c("res (LFC<0 -> Floresta)", "res (LFC>0 -> Peneira)", "zero_ind: Peneira-only", "zero_ind: Floresta-only", "other"),
+         pch = 16,
+         col = c("blue3", "red3", "darkorange2", "deepskyblue3", "grey80"),
+         bty = "n", cex = 0.8)
+  dev.off()
+  
+  pdf(out_pdf, width = 14, height = 10)
+  par(mar = c(2, 2, 2, 10))
+  ape::plot.phylo(tr, cex = 0.7, label.offset = 0.01, no.margin = TRUE)
+  ape::tiplabels(pch = 16, col = tip_cols, cex = 1.1)
+  title(main = paste0("OpenTree induced genus phylogeny | tip icons: LFC (res) + presence/absence (zero_ind)\n",
+                      "LFC range: [", signif(lfc_min, 3), ", ", signif(lfc_max, 3), "]"))
+  legend("topleft",
+         legend = c("res (LFC<0 -> Floresta)", "res (LFC>0 -> Peneira)", "zero_ind: Peneira-only", "zero_ind: Floresta-only", "other"),
+         pch = 16,
+         col = c("blue3", "red3", "darkorange2", "deepskyblue3", "grey80"),
+         bty = "n", cex = 0.8)
+  dev.off()
+  
+  message(">>> Step 10: phylogeny written to: ", out_png, " and ", out_pdf)
+  invisible(list(tree = tr, tip_meta = meta_tip, tip_colors = tip_cols, resolved = mdt))
+}
+
+# ==========================================================
 # Calling functions
 # ==========================================================
 merge_batches_if_needed(infile)
@@ -821,11 +1111,24 @@ dt_raw <- obj0$dt_raw
 #Capture Step 7 output; use USE_COUNTS_ANCOM
 res7 <- step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
 
+#keep raw ANCOM-BC2 object path for zero_ind retrieval
+ancom_raw_rds <- file.path(TABLES_DIR, paste0(prefix, "_ancombc2_raw.rds"))
+
 #Heatmap based on Step 7 significant genera
 step9_heatmap_ancom_sig(dt_raw, res7, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
 
 # Step 8 uses USE_COUNTS_ANCOM
 step8_ancombc2_by_code(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
+
+#build true phylogeny from OTL + overlay LFC and zero_ind
+step10_otl_phylogeny_lfc_zeroind(
+  res7_summary    = res7,
+  ancombc2_raw_rds = ancom_raw_rds,
+  outdir          = outdir,
+  prefix          = prefix,
+  PLOTS_DIR       = PLOTS_DIR,
+  TABLES_DIR      = TABLES_DIR
+)
 
 message(">>> Done. Outputs in:")
 message(">>>   tables: ", TABLES_DIR)
