@@ -393,7 +393,7 @@ create_env
 # phyloseq + microbiome must be installed BEFORE downstream step7
 install_phyloseq_and_microbiome_r
 
-ensure_rotl_and_ape_conda
+ensure_rotl_and_ape
 
 ensure_ancombc
 run_downstream
