@@ -801,6 +801,61 @@ step9_heatmap_ancom_sig <- function(dt_raw, ancom_out, outdir, prefix, USE_COUNT
   invisible(list(matrix = hm, annotation = meta_ord, sig = sig))
 }
 
+### OpenTree helpers (used in Step 10)
+
+filter_otl_matches <- function(mdt) {
+  # expects columns: search_string, ott_id; optionally flags
+  stopifnot(all(c("search_string","ott_id") %in% names(mdt)))
+  
+  mdt <- mdt[!is.na(ott_id)]
+  
+  # Drop known-bad flags if present
+  if ("flags" %in% names(mdt)) {
+    bad_pat <- "(pruned_ott_id|deprecated_ott_id|forwarded_ott_id|blocked|taxon_incomplete)"
+    mdt <- mdt[
+      is.na(flags) | flags == "" | !grepl(bad_pat, flags, ignore.case = TRUE)
+    ]
+  }
+  
+  # Keep first/best hit per search_string (you already do this)
+  mdt <- mdt[, .SD[1], by = search_string]
+  
+  mdt
+}
+
+safe_tol_induced_subtree <- function(ott_ids, label_format = "name") {
+  ott_ids <- unique(ott_ids)
+  
+  repeat {
+    if (length(ott_ids) < 2) {
+      stop("Too few OTT IDs to build induced subtree after filtering.")
+    }
+    
+    tr <- tryCatch(
+      rotl::tol_induced_subtree(ott_ids = ott_ids, label_format = label_format),
+      error = function(e) e
+    )
+    
+    if (!inherits(tr, "error")) return(tr)
+    
+    msg <- conditionMessage(tr)
+    
+    # Try to extract an ott id from the error message and drop it, then retry
+    hit <- regmatches(msg, regexec("ott[0-9]+", msg))[[1]]
+    if (length(hit) >= 1) {
+      bad <- hit[1]
+      bad_int <- suppressWarnings(as.integer(gsub("^ott", "", bad)))
+      message(">>> Step 10: OpenTree error for ", bad, " ; dropping and retrying.")
+      ott_ids <- ott_ids[ott_ids != bad_int]
+      next
+    }
+    
+    # Unknown error: stop
+    stop(tr)
+  }
+}
+### -----------------------------------------------------------------------
+
 # ==========================================================
 # STEP 10: Real phylogeny tree (Open Tree of Life) + tip icons
 #   - builds an induced subtree from OTL using genus names
@@ -960,7 +1015,6 @@ step10_otl_phylogeny_lfc_zeroind <- function(
   
   # ---------- 4) resolve to OTL IDs and induced subtree ----------
   message(">>> Step 10: resolving genus names in OpenTree (tnrs_match_names)...")
-  # rotl expects vectors; this may return multiple matches; we take the best for each name
   m <- rotl::tnrs_match_names(keep, do_approximate_matching = TRUE)
   
   # rotl returns a data.frame-like object; keep ott_id and unique name mapping
@@ -968,13 +1022,14 @@ step10_otl_phylogeny_lfc_zeroind <- function(
   if (!all(c("search_string", "ott_id") %in% names(mdt))) {
     stop(">>> Step 10: unexpected tnrs_match_names output; missing search_string/ott_id columns.")
   }
-  mdt <- mdt[!is.na(ott_id)]
+  
+  #filter out NA + flagged OTT IDs (pruned/deprecated/etc.), then best hit per name
+  mdt <- filter_otl_matches(mdt)
+  
   if (nrow(mdt) == 0) {
-    stop(">>> Step 10: none of the selected genera could be resolved in OpenTree.")
+    stop(">>> Step 10: none of the selected genera could be resolved in OpenTree (after filtering flags).")
   }
   
-  # take first/best hit per search_string
-  mdt <- mdt[, .SD[1], by = search_string]
   resolved_keep <- mdt$search_string
   ott_ids <- mdt$ott_id
   
@@ -983,19 +1038,17 @@ step10_otl_phylogeny_lfc_zeroind <- function(
     return(invisible(NULL))
   }
   
-  message(">>> Step 10: fetching induced subtree from OpenTree (tol_induced_subtree)...")
-  tr <- rotl::tol_induced_subtree(ott_ids = ott_ids)
+  #use safe wrapper (drops missing ott ids and retries)
+  message(">>> Step 10: fetching induced subtree from OpenTree (tol_induced_subtree; safe)...")
+  tr <- safe_tol_induced_subtree(ott_ids = ott_ids)
   
   # The tree tips are ott IDs by default; replace with your genus labels
-  # Map tip labels to search_string where possible.
   tip_map <- data.table::data.table(
     tip_label = tr$tip.label
   )
-  # Extract ott id from tip label like "ott12345" (rotl uses "ott####")
   tip_map[, ott_id := suppressWarnings(as.integer(gsub("^ott", "", tip_label)))]
   tip_map <- merge(tip_map, mdt[, .(search_string, ott_id)], by = "ott_id", all.x = TRUE)
   
-  # fallback: keep original if unresolved
   new_labels <- ifelse(is.na(tip_map$search_string), tip_map$tip_label, tip_map$search_string)
   tr$tip.label <- new_labels
   
