@@ -320,6 +320,44 @@ ensure_ancombc() {
   Rscript -e 'cat("ANCOMBC path: ", find.package("ANCOMBC"), "\n", sep="")' || true
 }
 
+# ==========================================================
+# Ensure r-rotl and r-ape are available (phylogeny step)
+# ==========================================================
+ensure_rotl_and_ape_conda() {
+  log "Checking for r-rotl and r-ape in conda env '${ENV_NAME}'..."
+
+  local missing=()
+
+  conda list -n "${ENV_NAME}" r-rotl >/dev/null 2>&1 || missing+=("r-rotl")
+  conda list -n "${ENV_NAME}" r-ape  >/dev/null 2>&1 || missing+=("r-ape")
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    log "r-rotl and r-ape already present."
+    return 0
+  fi
+
+  log "Missing packages detected: ${missing[*]}"
+  log "Installing missing R phylogeny packages via conda-forge..."
+
+  if command -v mamba >/dev/null 2>&1; then
+    mamba install -n "${ENV_NAME}" -c conda-forge "${missing[@]}" -y
+  else
+    conda install -n "${ENV_NAME}" -c conda-forge "${missing[@]}" -y
+  fi
+
+  log "r-rotl / r-ape installation complete."
+
+  # Optional but recommended: verify loadability from R
+  Rscript -e '
+    ok <- TRUE
+    tryCatch({ suppressPackageStartupMessages(library(rotl)) }, error=function(e){ ok <<- FALSE })
+    tryCatch({ suppressPackageStartupMessages(library(ape))  }, error=function(e){ ok <<- FALSE })
+    quit(status = ifelse(ok, 0, 1))
+  ' || die "r-rotl / r-ape installed but not loadable from R."
+
+  log "r-rotl and r-ape are loadable in R."
+}
+
 run_downstream() {
   export USE_COUNTS_0_4="${USE_COUNTS_0_4:-0}"
   export USE_COUNTS_5="${USE_COUNTS_5:-1}"
@@ -335,7 +373,7 @@ run_downstream() {
   log "  MODE           = $MODE"
   log "  USE_COUNTS_0_4 = $USE_COUNTS_0_4"
   log "  USE_COUNTS_5   = $USE_COUNTS_5"
-  log "  USE_COUNTS_ANCOM = $USE_COUNTS_ANCOM"  
+  log "  USE_COUNTS_ANCOM = $USE_COUNTS_ANCOM"
 
   Rscript workflow/downstream_analysis.R \
     "$INFILE" \
@@ -347,8 +385,10 @@ run_downstream() {
 
 create_env
 
-#phyloseq + microbiome must be installed BEFORE downstream step7
+# phyloseq + microbiome must be installed BEFORE downstream step7
 install_phyloseq_and_microbiome_r
+
+ensure_rotl_and_ape_conda
 
 ensure_ancombc
 run_downstream
