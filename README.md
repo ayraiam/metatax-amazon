@@ -42,7 +42,7 @@ STRUCTURE
 DEPENDENCIES
 ------------
  - Python ≥ 3.10
- - R ≥ 4.3
+ - R ≥ 4.5                    
  - Conda or Mamba
  - Slurm (or compatible scheduler)
  - NanoPlot · FastQC · MultiQC · SeqKit · Cutadapt · NanoFilt · Emu
@@ -86,12 +86,18 @@ MAIN OPTIONS
   ### Numeric source selection (split behavior)
   ### Parts 0–4 control stacked bars + alpha/beta diversity
   ### Part 5 controls CLR concordance scatter plots
+  ### Steps 7–8 (ANCOM-BC2) are controlled independently (see below)  
+
   --use-counts-0-4 INT  Numeric column for Parts 0–4 (default: 0)
                           0 = abundance
                           1 = estimated_counts
 
   --use-counts-5 INT    Numeric column for Part 5 (default: 1)
                           1 = estimated_counts (recommended for CLR)
+                          0 = abundance
+
+  --use-counts-ancom INT Numeric column for Steps 7–8 (ANCOM-BC2) (default: 1)  
+                          1 = estimated_counts (recommended; ANCOM-BC2 expects counts)  
                           0 = abundance
 </pre>
 
@@ -108,17 +114,16 @@ environment variables that are passed through to `run_emu_amplicons.sh`:
 ### NOTE
 These variables control the **Emu stage only**.
 The downstream analysis is selected independently using `--mode 16S|ITS`.
+</pre>
 
-Examples:
-
-  # ITS + LSU only
-  ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=1 bash workflow/runall.sh ...
-
-  # 16S only
-  ENABLE_16S=1 ENABLE_ITS=0 ENABLE_LSU=0 bash workflow/runall.sh ...
-
-  # All markers (assuming ITS / LSU DBs exist)
-  ENABLE_16S=1 ENABLE_ITS=1 ENABLE_LSU=1 bash workflow/runall.sh ...
+<pre>
+DOWNSTREAM NOTES (IMPORTANT)                                   
+-------------------------
+- Parts 0–4 default to `abundance` (compositional-style plots + diversity metrics).
+- Part 5 defaults to `estimated_counts` (recommended for CLR concordance).
+- Steps 7–8 (ANCOM-BC2) default to `estimated_counts` via `--use-counts-ancom 1`,
+  because ANCOM-BC2 is a count-based model and expects counts rather than relative abundance.  
+- Step 9 generates a pheatmap heatmap for ANCOM-BC2 significant genera (CLR-transformed).  
 </pre>
 
 <pre>
@@ -142,7 +147,7 @@ EXAMPLES
 
 # 1) Run ALL stages (QC → Emu → Downstream) for 16S only (default)
 bash workflow/runall.sh --mode 16S
-(Defaults: Parts 0–4 use abundance; Part 5 uses estimated_counts)
+(Defaults: Parts 0–4 use abundance; Part 5 uses estimated_counts; ANCOM-BC2 uses estimated_counts)  
 
 # 2) Run ALL stages with custom resources
 bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
@@ -213,21 +218,25 @@ bash workflow/runall.sh --no-downstream
 # 16) Override numeric sources explicitly (rare / advanced):
 #     - Parts 0–4: stacked bars + alpha/beta
 #     - Part 5: CLR concordance
+#     - Steps 7–8: ANCOM-BC2 differential abundance
 bash workflow/runall.sh --mode 16S \
   --use-counts-0-4 1 \
-  --use-counts-5 0
+  --use-counts-5 0 \
+  --use-counts-ancom 1                                  
 </pre>
 
 <pre>
 OUTPUTS
 -------
- logs/                             - timestamped job logs
- results/filtered/                 - post-filtered FASTQs
- results/emu_runs_bXXX/            - per-marker Emu output (16S / ITS / LSU separated)
- results/tables_bXXX/              - merged abundance & mapping tables
- results/plots_bXXX/               - genus-level stacked barplots
- results/plots/*_code_concordance*/- per-code genus CLR concordance scatter plots   ### NEW
- metadata/                         - FASTQ manifest, JSON dicts, primer lists
+ logs/                                   - timestamped job logs
+ results/filtered/                       - post-filtered FASTQs
+ results/emu_runs_bXXX/                  - per-marker Emu output (16S / ITS / LSU separated)
+ results/tables_bXXX/                    - merged abundance & mapping tables
+ results/plots_bXXX/                     - genus-level stacked barplots
+ results/plots/*_code_concordance*/      - per-code genus CLR concordance scatter plots
+ results/plots/*_ancombc2*               - ANCOM-BC2 volcano + tables (Steps 7–8)           
+ results/plots/*_heatmap_ancom_sig*      - pheatmap heatmap of ANCOM-BC2 significant genera 
+ metadata/                               - FASTQ manifest, JSON dicts, primer lists
 </pre>
 
 <pre>
@@ -252,4 +261,5 @@ https://www.linkedin.com/company/ayraiam
 </pre>
 
 <p align="center"><sub>© 2025 AY:RΔ — data and discovery in flow</sub></p>
+
 
