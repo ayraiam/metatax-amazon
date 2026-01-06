@@ -9,6 +9,7 @@
 # 6) Per-code genus CLR concordance scatter plots (Peneira vs Floresta)
 # 7) Differential taxa (Floresta vs Peneira) via ANCOM-BC2 (L01 only)
 # 8) Differential taxa per code (Floresta CODE vs Peneira CODE) via ANCOM-BC2 (L01 only)
+# 9) Heatmap (pheatmap) of ANCOM-BC2 significant genera (L01 Floresta vs Peneira)
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -48,8 +49,13 @@ prefix <- paste0(user_prefix, "_", MODE)
 
 USE_COUNTS_0_4 <- as.integer(Sys.getenv("USE_COUNTS_0_4", "0"))  # default: abundance
 USE_COUNTS_5   <- as.integer(Sys.getenv("USE_COUNTS_5",   "1"))  # default: estimated_counts
+
+#Dedicated flag for ANCOM-BC2 input
+USE_COUNTS_ANCOM <- as.integer(Sys.getenv("USE_COUNTS_ANCOM", "1"))  # default: estimated_counts
+
 message(">>> USE_COUNTS_0_4 = ", USE_COUNTS_0_4)
 message(">>> USE_COUNTS_5   = ", USE_COUNTS_5)
+message(">>> USE_COUNTS_ANCOM = ", USE_COUNTS_ANCOM)  
 
 # ==========================================================
 # 0) If infile does NOT exist, merge batch tables_b*/abundance_combined.tsv
@@ -103,7 +109,7 @@ merge_batches_if_needed <- function(infile) {
 # Helpers: extract environment + code/replicate
 # ==========================================================
 
-#canonicalize/normalize sample IDs BEFORE any downstream logic
+#normalize sample IDs BEFORE any downstream logic
 ### - forces LO1/IO1/O1 etc -> L01
 ### - forces LO2/IO2/O2 etc -> L02
 ### - also uppercases and trims spaces
@@ -417,312 +423,13 @@ step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_
 }
 
 # ==========================================================
-# STEP 1: Stacked bars
-# ==========================================================
-step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR) {
-  p_family <- make_env_stacks(
-    dt_raw, "family",
-    file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.png")),
-    file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.pdf")),
-    N = 20, title_rank = "Family", value_col = VAL_0_4
-  )
-  p_genus <- make_env_stacks(
-    dt_raw, "genus",
-    file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.png")),
-    file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.pdf")),
-    N = 20, title_rank = "Genus", value_col = VAL_0_4
-  )
-  
-  if (!is.null(p_family) && !is.null(p_genus)) {
-    combined <- plot_grid(p_family, p_genus, ncol = 1, rel_heights = c(1, 1), align = "v")
-    ggsave(file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.png")),
-           combined, width = 22, height = 10, dpi = 300)
-    ggsave(file.path(PLOTS_DIR, paste0(prefix, "_stacks_family_genus_grid.pdf")),
-           combined, width = 22, height = 10)
-  }
-}
-
-# ==========================================================
-# STEP 2: Alpha diversity (Shannon & Simpson only)
-# ==========================================================
-step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
-  mx_rel  <- build_matrix(dt_raw, "genus", value_col = VAL_0_4)
-  mat_rel <- mx_rel$mat
-  meta    <- mx_rel$meta
-  
-  row_sums <- rowSums(mat_rel, na.rm = TRUE); row_sums[row_sums == 0] <- 1
-  rel <- sweep(mat_rel, 1, row_sums, "/")
-  
-  shannon <- vegan::diversity(rel, index = "shannon")
-  simpson <- vegan::diversity(rel, index = "simpson")
-  
-  alpha_df <- data.table::data.table(
-    file    = rownames(mat_rel),
-    Shannon = as.numeric(shannon),
-    Simpson = as.numeric(simpson)
-  )
-  alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
-  
-  alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
-  
-  data.table::fwrite(alpha_df, file = file.path(TABLES_DIR, paste0(prefix, "_alpha_diversity.tsv")), sep  = "\t")
-  
-  # ---- pairwise tests + plots (unchanged) ----
-  pairwise_wilcox <- function(df, value_col, metric_name) {
-    df <- df[!is.na(environment) & !is.na(get(value_col))]
-    envs <- levels(df$environment)
-    envs <- envs[envs %in% unique(df$environment)]
-    if (length(envs) < 2) {
-      return(data.table(env1 = character(0), env2 = character(0),
-                        metric = character(0), p_value = numeric(0)))
-    }
-    
-    cmb <- t(combn(envs, 2))
-    res_list <- apply(cmb, 1, function(pair_env) {
-      e1 <- pair_env[1]; e2 <- pair_env[2]
-      x <- df[environment == e1][[value_col]]
-      y <- df[environment == e2][[value_col]]
-      p <- tryCatch(wilcox.test(x, y)$p.value, error = function(e) NA_real_)
-      data.table(env1 = e1, env2 = e2, metric = metric_name, p_value = p)
-    })
-    rbindlist(res_list)
-  }
-  
-  pval_to_stars <- function(p) {
-    ifelse(p < 0.001, "***",
-           ifelse(p < 0.01, "**",
-                  ifelse(p < 0.05, "*", "ns")))
-  }
-  
-  build_sig_df <- function(sig_pw, df, value_col) {
-    if (nrow(sig_pw) == 0) return(NULL)
-    
-    env_levels <- levels(df$environment)
-    rng <- range(df[[value_col]], na.rm = TRUE)
-    y_min <- rng[1]; y_max <- rng[2]
-    y_step <- 0.05 * (y_max - y_min)
-    if (is.na(y_step) || y_step == 0) y_step <- 0.1
-    
-    sig_pw <- copy(sig_pw)[order(p_value)]
-    sig_pw[, idx := seq_len(.N)]
-    sig_pw[, `:=`(
-      x    = match(env1, env_levels),
-      xend = match(env2, env_levels),
-      y    = y_max + idx * y_step,
-      label = pval_to_stars(p_value)
-    )]
-    sig_pw
-  }
-  
-  pw_shannon <- pairwise_wilcox(alpha_df, "Shannon", "Shannon")
-  pw_simpson <- pairwise_wilcox(alpha_df, "Simpson", "Simpson")
-  pw_all <- rbind(pw_shannon, pw_simpson)
-  
-  fwrite(pw_all, file = file.path(TABLES_DIR, paste0(prefix, "_alpha_pairwise_wilcox.tsv")), sep = "\t")
-  
-  sig_shannon <- pw_shannon[!is.na(p_value) & p_value < 0.05]
-  sig_simpson <- pw_simpson[!is.na(p_value) & p_value < 0.05]
-  
-  sig_sh_df <- build_sig_df(sig_shannon, alpha_df, "Shannon")
-  sig_sp_df <- build_sig_df(sig_simpson, alpha_df, "Simpson")
-  
-  theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
-  
-  env_colors <- c(
-    "Campina"  = "#FFCC00",
-    "Floresta" = "#99CC33",
-    "Igarape"  = "#3399FF",
-    "Peneira"  = "#FF9900"
-  )
-  
-  p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
-    geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, alpha = 0.5, color = "black", show.legend = FALSE) +
-    geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-    labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
-    scale_fill_manual(values = env_colors) +
-    scale_color_manual(values = env_colors) +
-    theme_base
-  
-  if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
-    p_sh <- p_sh +
-      geom_segment(data = sig_sh_df, aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE) +
-      geom_text(data = sig_sh_df, aes(x = (x + xend) / 2, y = y, label = label),
-                vjust = -0.3, size = 3, inherit.aes = FALSE)
-  }
-  
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_shannon_env.png")), p_sh, width = 3, height = 5, dpi = 300)
-  
-  p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, color = environment)) +
-    geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, alpha = 0.5, color = "black", show.legend = FALSE) +
-    geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-    labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
-    scale_fill_manual(values = env_colors) +
-    scale_color_manual(values = env_colors) +
-    theme_base
-  
-  if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
-    p_sp <- p_sp +
-      geom_segment(data = sig_sp_df, aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE) +
-      geom_text(data = sig_sp_df, aes(x = (x + xend) / 2, y = y, label = label),
-                vjust = -0.3, size = 3, inherit.aes = FALSE)
-  }
-  
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_simpson_env.png")), p_sp, width = 3, height = 5, dpi = 300)
-  
-  list(rel = rel, meta = meta, alpha_df = alpha_df)
-}
-
-# ==========================================================
-# STEP 3: Beta diversity PCoA
-# ==========================================================
-step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
-  env_colors <- c(
-    "Campina"  = "#FFCC00",
-    "Floresta" = "#99CC33",
-    "Igarape"  = "#3399FF",
-    "Peneira"  = "#FF9900"
-  )
-  theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
-  
-  bray <- vegan::vegdist(rel, method = "bray")
-  
-  pcoa <- cmdscale(bray, k = 2, eig = TRUE)
-  eig  <- pcoa$eig
-  eig[eig < 0] <- 0
-  var_expl <- eig / sum(eig)
-  pc1_lab <- sprintf("PC1 (%.1f%%)", 100 * var_expl[1])
-  pc2_lab <- sprintf("PC2 (%.1f%%)", 100 * var_expl[2])
-  
-  pcoa_df <- data.table(
-    file = rownames(rel),
-    PC1  = pcoa$points[, 1],
-    PC2  = pcoa$points[, 2]
-  )
-  pcoa_df <- merge(pcoa_df, meta, by = "file", all.x = TRUE)
-  
-  fwrite(pcoa_df, file = file.path(TABLES_DIR, paste0(prefix, "_pcoa_braycurtis.tsv")), sep = "\t")
-  
-  p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
-    geom_point(size = 2.5, alpha = 0.9) +
-    scale_color_manual(values = env_colors, na.value = "grey70") +
-    labs(x = pc1_lab, y = pc2_lab, title = "") +
-    theme_base
-  
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_pcoa_braycurtis_env.png")), p_pcoa, width = 5, height = 4, dpi = 300)
-  
-  list(bray = bray)
-}
-
-# ==========================================================
-# STEP 4: Beta stats
-# ==========================================================
-step4_beta_stats <- function(bray, meta, outdir, prefix, TABLES_DIR) {
-  set.seed(2025)
-  meta$environment <- factor(meta$environment)
-  
-  perm <- vegan::adonis2(bray ~ environment, data = meta, permutations = 999)
-  perm_df <- as.data.frame(perm)
-  
-  fwrite(as.data.table(perm_df, keep.rownames = "term"),
-         file = file.path(TABLES_DIR, paste0(prefix, "_beta_permanova.tsv")), sep = "\t")
-  
-  bd <- vegan::betadisper(bray, meta$environment)
-  bd_anova   <- as.data.frame(anova(bd))
-  bd_perm    <- vegan::permutest(bd, permutations = 999)
-  bd_perm_df <- as.data.frame(bd_perm$tab)
-  
-  fwrite(as.data.table(bd_anova, keep.rownames = "term"),
-         file = file.path(TABLES_DIR, paste0(prefix, "_beta_betadisper_anova.tsv")), sep = "\t")
-  
-  fwrite(as.data.table(bd_perm_df, keep.rownames = "term"),
-         file = file.path(TABLES_DIR, paste0(prefix, "_beta_betadisper_permutest.tsv")), sep = "\t")
-}
-
-# ==========================================================
-# STEP 5: Concordance scatter
-# ==========================================================
-step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR) {
-  clr_tbl <- copy(clr_obj$table)
-  
-  clr_tbl <- clr_tbl[
-    environment %in% c("Peneira", "Floresta") &
-      !is.na(pairing_code) & pairing_code != "" &
-      !is.na(replicate) & replicate != ""
-  ]
-  
-  target_codes <- c("500", "1500", "2500", "3500", "4500")
-  clr_tbl <- clr_tbl[pairing_code %in% target_codes]
-  
-  corr_dir <- file.path(PLOTS_DIR, paste0(prefix, "_code_concordance_", MODE))
-  dir.create(corr_dir, showWarnings = FALSE, recursive = TRUE)
-  
-  fl <- clr_tbl[environment == "Floresta",
-                .(pairing_code, replicate, genus,
-                  file_floresta = file,
-                  CLR_Floresta = clr)]
-  
-  pn <- clr_tbl[environment == "Peneira",
-                .(pairing_code, replicate, genus,
-                  file_peneira = file,
-                  CLR_Peneira = clr)]
-  
-  pairs <- merge(pn, fl, by = c("pairing_code", "replicate", "genus"), allow.cartesian = TRUE)
-  
-  pairs[, pair_id := paste0(file_peneira, " vs ", file_floresta)]
-  pairs[, floresta_partner := fifelse(grepl("^L01_", toupper(file_floresta)), "L01",
-                                      fifelse(grepl("^L02_", toupper(file_floresta)), "L02", NA_character_))]
-  
-  pairs <- pairs[floresta_partner == "L01"]
-  
-  for (cc in target_codes) {
-    df <- pairs[pairing_code == cc]
-    if (nrow(df) == 0) next
-    
-    df[, deltaCLR := CLR_Peneira - CLR_Floresta]
-    df[, abs_deltaCLR := abs(deltaCLR)]
-    
-    df_out <- df[order(-abs_deltaCLR, genus, replicate, file_peneira, file_floresta)]
-    
-    ct <- suppressWarnings(cor.test(df$CLR_Floresta, df$CLR_Peneira, method = "pearson"))
-    r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
-    
-    p <- ggplot(df, aes(x = CLR_Floresta, y = CLR_Peneira)) +
-      geom_point(alpha = 0.55, size = 1.2) +
-      geom_smooth(method = "lm", se = FALSE, linewidth = 0.6,
-                  linetype = "dashed", color = "grey30", alpha = .5) +
-      labs(
-        title = paste0("Pearson R² = ", sprintf("%.2f", r2), ", p = ", signif(pval, 2)),
-        x = "\nCLR (Floresta samples)",
-        y = "CLR (Peneira samples)\n"
-      ) +
-      theme_classic(base_size = 12)
-    
-    ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter.png")),
-           p, width = 5.2, height = 4.2, dpi = 300)
-    ggsave(file.path(corr_dir, paste0(prefix, "_code_", cc, "_L01_scatter.pdf")),
-           p, width = 5.2, height = 4.2)
-    
-    fwrite(
-      df_out[, .(pairing_code, replicate, genus,
-                 file_peneira, file_floresta, floresta_partner,
-                 CLR_Peneira, CLR_Floresta, deltaCLR, abs_deltaCLR, pair_id)],
-      file = file.path(TABLES_DIR, paste0(prefix, "_code_", cc, "_L01_paired_dots.tsv")),
-      sep  = "\t"
-    )
-  }
-  
-  message(">>> Concordance scatter plots in: ", corr_dir)
-}
-
-# ==========================================================
 # STEP 7: Differential taxa (ANCOM-BC2) via PHYLOSEQ
 #   #L01-only Floresta, keep Peneira; exclude L02 entirely
 # ==========================================================
-step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR) {
-  value_col <- if (USE_COUNTS_0_4 == 1) "estimated_counts" else "abundance"
-  message(">>> Step 7 (ANCOM-BC2) value_col = ", value_col, " (driven by USE_COUNTS_0_4)")
+#Signature now uses USE_COUNTS_ANCOM
+step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR) {
+  value_col <- if (USE_COUNTS_ANCOM == 1) "estimated_counts" else "abundance"
+  message(">>> Step 7 (ANCOM-BC2) value_col = ", value_col, " (driven by USE_COUNTS_ANCOM)")
   
   suppressPackageStartupMessages({
     if (!requireNamespace("ANCOMBC", quietly = TRUE) && !requireNamespace("ancombc", quietly = TRUE)) {
@@ -920,7 +627,8 @@ step7_ancombc2 <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, P
 # STEP 8: Differential taxa per pairing_code (ANCOM-BC2)
 #   #L01-only Floresta, keep Peneira; drop L02
 # ==========================================================
-step8_ancombc2_by_code <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR,
+#Signature now uses USE_COUNTS_ANCOM
+step8_ancombc2_by_code <- function(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR,
                                    target_codes = c("500", "1500", "2500", "3500", "4500")) {
   
   if (!"pairing_code" %in% names(dt_raw)) {
@@ -956,7 +664,7 @@ step8_ancombc2_by_code <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLE
       dt_raw = dt_cc,
       outdir = outdir,
       prefix = prefix_cc,
-      USE_COUNTS_0_4 = USE_COUNTS_0_4,
+      USE_COUNTS_ANCOM = USE_COUNTS_ANCOM,   
       TABLES_DIR = TABLES_DIR,
       PLOTS_DIR = PLOTS_DIR
     )
@@ -966,31 +674,158 @@ step8_ancombc2_by_code <- function(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLE
 }
 
 # ==========================================================
+# STEP 9: Heatmap (pheatmap) of ANCOM-BC2 significant genera
+# ==========================================================
+
+step9_heatmap_ancom_sig <- function(dt_raw, ancom_out, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR,
+                                    q_cut = 0.05, top_n = 40, pseudocount = 1) {
+  
+  # Install/load pheatmap
+  if (!requireNamespace("pheatmap", quietly = TRUE)) {
+    message(">>> Installing CRAN package 'pheatmap'...")
+    install.packages("pheatmap", repos = "https://cloud.r-project.org")
+  }
+  suppressPackageStartupMessages(library(pheatmap))
+  
+  if (is.null(ancom_out) || nrow(ancom_out) == 0) {
+    message(">>> Step 9: ancom_out is empty; skipping heatmap.")
+    return(invisible(NULL))
+  }
+  
+  value_col <- if (USE_COUNTS_ANCOM == 1) "estimated_counts" else "abundance"
+  message(">>> Step 9 (heatmap) value_col = ", value_col)
+  
+  sig <- data.table::as.data.table(ancom_out)
+  sig <- sig[is.finite(q_val) & q_val < q_cut]
+  if (nrow(sig) == 0) {
+    message(">>> Step 9: No genera pass q < ", q_cut, "; skipping heatmap.")
+    return(invisible(NULL))
+  }
+  
+  data.table::setorder(sig, q_val, -abs_lfc, genus)
+  if (!is.null(top_n) && nrow(sig) > top_n) sig <- sig[1:top_n]
+  
+  keep_genera <- unique(sig$genus)
+  
+  # Filter to the same comparison set used in Step 7
+  dt2 <- data.table::copy(dt_raw)[environment %in% c("Floresta", "Peneira")]
+  dt2 <- dt2[is.finite(get(value_col))]
+  dt2 <- dt2[
+    (environment == "Floresta" & grepl("^L01_", file)) |
+      (environment == "Peneira"  & grepl("^PENEIRA_", file))
+  ]
+  
+  gen_long <- dt2[, .(val = sum(get(value_col), na.rm = TRUE)),
+                  by = .(file, environment, code, pairing_code, replicate, genus)]
+  gen_long[is.na(genus) | genus == "", genus := "No genus"]
+  gen_long <- gen_long[genus %in% keep_genera]
+  
+  if (nrow(gen_long) == 0) {
+    message(">>> Step 9: No data for selected genera after filtering; skipping heatmap.")
+    return(invisible(NULL))
+  }
+  
+  wide <- data.table::dcast(gen_long, file + environment + code + pairing_code + replicate ~ genus,
+                            value.var = "val", fill = 0)
+  
+  meta <- as.data.frame(wide[, .(file, environment, code, pairing_code, replicate)])
+  rownames(meta) <- meta$file
+  
+  mat_samp_x_gen <- as.matrix(wide[, setdiff(names(wide), c("file","environment","code","pairing_code","replicate")), with = FALSE])
+  rownames(mat_samp_x_gen) <- wide$file
+  
+  # CLR per sample: log(count + pc) - mean(log(count + pc))
+  logm <- log(mat_samp_x_gen + pseudocount)
+  clr  <- logm - rowMeans(logm)
+  
+  # pheatmap expects rows=features, cols=samples (typical)
+  hm <- t(clr)  # genera x samples
+  
+  # Order samples: Floresta then Peneira; within by pairing_code/code/replicate if available
+  meta$environment <- factor(meta$environment, levels = c("Floresta", "Peneira"))
+  meta$pairing_code <- as.character(meta$pairing_code)
+  meta$code <- as.character(meta$code)
+  meta$replicate <- as.character(meta$replicate)
+  
+  ord <- order(meta$environment, meta$pairing_code, meta$code, meta$replicate, rownames(meta))
+  meta_ord <- meta[ord, , drop = FALSE]
+  hm <- hm[, rownames(meta_ord), drop = FALSE]
+  
+  ann_col <- meta_ord[, c("environment","pairing_code","replicate"), drop = FALSE]
+  colnames(ann_col) <- c("Environment", "Code", "Replicate")
+  
+  out_png <- file.path(PLOTS_DIR, paste0(prefix, "_heatmap_ancom_sig_clr.png"))
+  out_pdf <- file.path(PLOTS_DIR, paste0(prefix, "_heatmap_ancom_sig_clr.pdf"))
+  
+  # Save PNG
+  png(out_png, width = 1600, height = 1200, res = 150)
+  pheatmap::pheatmap(
+    hm,
+    annotation_col = ann_col,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    scale = "row",
+    fontsize_row = 8,
+    fontsize_col = 6,
+    main = paste0("ANCOM-BC2 significant genera (q<", q_cut, "), CLR heatmap (", value_col, ")")
+  )
+  dev.off()
+  
+  # Save PDF
+  pdf(out_pdf, width = 12, height = 9)
+  pheatmap::pheatmap(
+    hm,
+    annotation_col = ann_col,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    scale = "row",
+    fontsize_row = 8,
+    fontsize_col = 6,
+    main = paste0("ANCOM-BC2 significant genera (q<", q_cut, "), CLR heatmap (", value_col, ")")
+  )
+  dev.off()
+  
+  # Also export the underlying matrix (for reproducibility)
+  fwrite(
+    data.table::as.data.table(hm, keep.rownames = "genus"),
+    file = file.path(TABLES_DIR, paste0(prefix, "_heatmap_matrix_clr.tsv")),
+    sep = "\t"
+  )
+  fwrite(
+    data.table::as.data.table(meta_ord, keep.rownames = "file"),
+    file = file.path(TABLES_DIR, paste0(prefix, "_heatmap_sample_annotation.tsv")),
+    sep = "\t"
+  )
+  
+  message(">>> Step 9: Heatmap written to: ", out_png, " and ", out_pdf)
+  invisible(list(matrix = hm, annotation = meta_ord, sig = sig))
+}
+
+# ==========================================================
 # Calling functions
 # ==========================================================
 merge_batches_if_needed(infile)
 
 obj0 <- step0_read_stage(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR)
 dt_raw <- obj0$dt_raw
-VAL_0_4 <- obj0$VAL_0_4
-clr_obj <- obj0$clr_obj
 
-step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
+#step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
+#obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
+#rel  <- obj2$rel
+#meta <- obj2$meta
+#obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
+#bray <- obj3$bray
+#step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
+#step5_concordance(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
 
-obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
-rel  <- obj2$rel
-meta <- obj2$meta
+#Capture Step 7 output; use USE_COUNTS_ANCOM
+res7 <- step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
 
-obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
-bray <- obj3$bray
+#Heatmap based on Step 7 significant genera
+step9_heatmap_ancom_sig(dt_raw, res7, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
 
-step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
-
-step5_concordance(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
-
-step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR)
-
-step8_ancombc2_by_code(dt_raw, outdir, prefix, USE_COUNTS_0_4, TABLES_DIR, PLOTS_DIR)
+# Step 8 uses USE_COUNTS_ANCOM
+step8_ancombc2_by_code(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
 
 message(">>> Done. Outputs in:")
 message(">>>   tables: ", TABLES_DIR)
