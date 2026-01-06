@@ -321,46 +321,48 @@ ensure_ancombc() {
 }
 
 # ==========================================================
-# Ensure rotl + ape (conda preferred; CRAN fallback)
+# Ensure rotl + ape (+ deps) are available and LOADABLE
+#   - Do NOT compile from CRAN (XML often fails)
+#   - Use conda-forge binaries instead
 # ==========================================================
 ensure_rotl_and_ape() {
-  log "Ensuring 'rotl' + 'ape' are available in env '${ENV_NAME}'..."
+  log "Ensuring 'rotl' + 'ape' (+deps) are available and loadable in env '${ENV_NAME}'..."
 
-  # --- First try conda-forge packages (fast, binary) ---
-  local missing_conda=()
+  # 1) Check from *R* (source of truth)
+  if Rscript -e 'quit(status=ifelse(requireNamespace("rotl", quietly=TRUE) && requireNamespace("ape", quietly=TRUE), 0, 1))'; then
+    log "rotl + ape already loadable from R."
+    return 0
+  fi
 
-  conda list -n "${ENV_NAME}" r-rotl >/dev/null 2>&1 || missing_conda+=("r-rotl")
-  conda list -n "${ENV_NAME}" r-ape  >/dev/null 2>&1 || missing_conda+=("r-ape")
+  log "rotl/ape not loadable from R. Forcing conda-forge reinstall of the full stack..."
 
-  if [[ ${#missing_conda[@]} -gt 0 ]]; then
-    log "Conda missing: ${missing_conda[*]} -> installing via conda-forge..."
-    if command -v mamba >/dev/null 2>&1; then
-      mamba install -n "${ENV_NAME}" -c conda-forge "${missing_conda[@]}" -y
-    else
-      conda install -n "${ENV_NAME}" -c conda-forge "${missing_conda[@]}" -y
-    fi
+  local pkgs=(
+    r-ape
+    r-rotl
+    r-rentrez
+    r-xml
+    r-rncl
+  )
+
+  if command -v mamba >/dev/null 2>&1; then
+    # Force reinstall to fix 'conda says installed but R can't see it'
+    mamba install -n "${ENV_NAME}" -c conda-forge --force-reinstall "${pkgs[@]}" -y
   else
-    log "Conda shows r-rotl and r-ape already installed."
+    conda install -n "${ENV_NAME}" -c conda-forge --force-reinstall "${pkgs[@]}" -y
   fi
 
-  # --- Verify from THIS Rscript (critical) ---
-  log "Verifying rotl/ape loadability from R (this must succeed)..."
-  if ! Rscript -e 'suppressPackageStartupMessages(library(rotl)); suppressPackageStartupMessages(library(ape)); cat("OK\n")'; then
-    log "rotl/ape still not loadable from R. Falling back to CRAN install inside env..."
+  # 2) Verify again from THIS env R
+  log "Verifying loadability from R..."
+  Rscript -e '
+    suppressPackageStartupMessages(library(ape))
+    suppressPackageStartupMessages(library(rotl))
+    suppressPackageStartupMessages(library(rentrez))
+    suppressPackageStartupMessages(library(XML))
+    suppressPackageStartupMessages(library(rncl))
+    cat("OK: rotl/ape stack loadable\n")
+  ' || die "rotl/ape stack still not loadable even after conda-forge reinstall."
 
-    Rscript -e '
-      options(repos = c(CRAN="https://cloud.r-project.org"))
-      pkgs <- c("ape","rotl")
-      for (p in pkgs) {
-        if (!requireNamespace(p, quietly=TRUE)) install.packages(p)
-      }
-      suppressPackageStartupMessages(library(ape))
-      suppressPackageStartupMessages(library(rotl))
-      cat("OK\n")
-    ' || die "Failed to make rotl/ape loadable (conda + CRAN fallback both failed)."
-  fi
-
-  log "rotl + ape are installed and loadable."
+  log "rotl + ape (and deps) are installed and loadable."
 }
 
 run_downstream() {
