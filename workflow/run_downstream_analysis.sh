@@ -325,13 +325,17 @@ run_downstream() {
   export USE_COUNTS_5="${USE_COUNTS_5:-1}"
   export MODE="${MODE:-16S}"
 
+  #Dedicated ANCOM selector; default to estimated_counts
+  export USE_COUNTS_ANCOM="${USE_COUNTS_ANCOM:-1}"
+
   log "Running downstream_analysis.R with:"
-  log "  infile        = $INFILE"
-  log "  outdir        = $OUTDIR"
-  log "  basename      = $BASENAME"
-  log "  MODE          = $MODE"
-  log "  USE_COUNTS_0_4= $USE_COUNTS_0_4"
-  log "  USE_COUNTS_5  = $USE_COUNTS_5"
+  log "  infile         = $INFILE"
+  log "  outdir         = $OUTDIR"
+  log "  basename       = $BASENAME"
+  log "  MODE           = $MODE"
+  log "  USE_COUNTS_0_4 = $USE_COUNTS_0_4"
+  log "  USE_COUNTS_5   = $USE_COUNTS_5"
+  log "  USE_COUNTS_ANCOM = $USE_COUNTS_ANCOM"  
 
   Rscript workflow/downstream_analysis.R \
     "$INFILE" \
