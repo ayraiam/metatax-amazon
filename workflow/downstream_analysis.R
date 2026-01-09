@@ -1,15 +1,14 @@
 #!/usr/bin/env Rscript
 # ==========================================================
 # downstream_analysis.R
-# 1) Add 'environment' from filename rules
-# 2) Make environment-grouped stacked bars (Family & Genus)
-# 3) Alpha diversity (Shannon / Simpson)
-# 4) Beta diversity (Bray–Curtis PCoA, Genus)
-# 5) Beta-diversity stats: PERMANOVA + betadisper
-# 6) Per-code genus CLR concordance scatter plots (Peneira vs Floresta)
-# 7) Differential taxa (Floresta vs Peneira) via ANCOM-BC2 (L01 only)
-# 8) Differential taxa per code (Floresta CODE vs Peneira CODE) via ANCOM-BC2 (L01 only)
-# 9) Heatmap (pheatmap) of ANCOM-BC2 significant genera (L01 Floresta vs Peneira)
+# 1) Add 'environment' from filename rules (+ normalize sample IDs / extract code+replicate; drop BAD_FILE)
+# 2) Build genus CLR table per sample (pseudocount + CLR), for concordance analyses
+# 3) Per-code genus CLR concordance scatter plots (Peneira vs Floresta), paired by (code × replicate × genus), L01-only Floresta
+# 4) Pooled genus CLR concordance scatter plot (ALL codes together), same pairing logic as per-code, L01-only Floresta
+# 5)  Stacked bars (Family & Genus), alpha diversity (Shannon/Simpson), beta diversity (Bray–Curtis PCoA), PERMANOVA + betadisper
+# 6)  Differential taxa (Floresta vs Peneira) via ANCOM-BC2 (L01-only Floresta; L02 excluded)
+# 7)  Differential taxa per code via ANCOM-BC2 (L01-only Floresta; L02 excluded)
+# 8)  Heatmap (pheatmap) of ANCOM-BC2 significant genera (L01 Floresta vs Peneira)
 # ==========================================================
 
 suppressPackageStartupMessages({
@@ -723,146 +722,90 @@ step5_concordance <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_D
 }
 
 # ==========================================================
-# STEP 6: pooled (all codes) genus CLR concordance scatter
-#   - each dot = (pairing_code x replicate x genus)
-#   - x: Floresta CLR (L01 only)
-#   - y: Peneira  CLR (PENEIRA_* only)
-#   - pools all codes together in one scatter
+# STEP 6: Concordance scatter (ALL CODES pooled in one plot)
+#   - uses the EXACT same pairing logic and dot definition as step5_concordance()
+#   - each dot = (pairing_code x replicate x genus) for a paired (Peneira vs Floresta) sample
+#   - keeps only Floresta partner = L01 (same as per-code)
+#   - aesthetics matched to per-code (alpha/size + dashed lm line + title with Pearson R^2 and p)
+#   - writes ONE pooled scatter + ONE pooled paired-dots table
 # ==========================================================
-step6c_allcodes_clr_concordance <- function(
-    clr_obj, outdir, prefix, MODE,
-    TABLES_DIR, PLOTS_DIR,
-    enforce_L01_floresta = TRUE,
-    enforce_peneira_only = TRUE,
-    label_top_n = 0,              # set >0 if you want to label most discordant points
-    color_by = c("pairing_code", "replicate", "none"),
-    point_alpha = 0.55,
-    point_size  = 1.1
-) {
-  color_by <- match.arg(color_by)
+step6b_concordance_allcodes <- function(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR) {
+  clr_tbl <- copy(clr_obj$table)
   
-  if (is.null(clr_obj) || is.null(clr_obj$table)) {
-    stop("step6c_allcodes_clr_concordance: clr_obj$table missing.")
-  }
+  clr_tbl <- clr_tbl[
+    environment %in% c("Peneira", "Floresta") &
+      !is.na(pairing_code) & pairing_code != "" &
+      !is.na(replicate) & replicate != ""
+  ]
   
-  dt <- data.table::as.data.table(clr_obj$table)
+  target_codes <- c("500", "1500", "2500", "3500", "4500")
+  clr_tbl <- clr_tbl[pairing_code %in% target_codes]
   
-  req <- c("file","environment","genus","clr","pairing_code","replicate")
-  miss <- setdiff(req, names(dt))
-  if (length(miss) > 0) stop("step6c_allcodes_clr_concordance: missing columns: ", paste(miss, collapse = ", "))
+  corr_dir <- file.path(PLOTS_DIR, paste0(prefix, "_code_concordance_", MODE))
+  dir.create(corr_dir, showWarnings = FALSE, recursive = TRUE)
   
-  # keep only target groups + finite clr
-  dt <- dt[environment %in% c("Floresta","Peneira")]
-  dt <- dt[is.finite(clr)]
-  dt[is.na(genus) | genus == "", genus := "No genus"]
-  dt[, pairing_code := as.character(pairing_code)]
-  dt[, replicate := as.character(replicate)]
+  fl <- clr_tbl[environment == "Floresta",
+                .(pairing_code, replicate, genus,
+                  file_floresta = file,
+                  CLR_Floresta = clr)]
   
-  # enforce the same sample inclusion logic you used elsewhere
-  if (enforce_L01_floresta) {
-    dt <- dt[
-      (environment == "Floresta" & grepl("^L01_", file)) |
-        (environment == "Peneira")
-    ]
-  }
-  if (enforce_peneira_only) {
-    dt <- dt[
-      (environment == "Floresta") |
-        (environment == "Peneira" & grepl("^PENEIRA_", file))
-    ]
-  }
+  pn <- clr_tbl[environment == "Peneira",
+                .(pairing_code, replicate, genus,
+                  file_peneira = file,
+                  CLR_Peneira = clr)]
   
-  # split and pair
-  flo <- dt[environment == "Floresta",
-            .(pairing_code, replicate, genus, clr_flo = clr, file_flo = file)]
-  pen <- dt[environment == "Peneira",
-            .(pairing_code, replicate, genus, clr_pen = clr, file_pen = file)]
+  pairs <- merge(pn, fl, by = c("pairing_code", "replicate", "genus"), allow.cartesian = TRUE)
   
-  paired <- merge(
-    flo, pen,
-    by = c("pairing_code","replicate","genus"),
-    all = FALSE
-  )
+  pairs[, pair_id := paste0(file_peneira, " vs ", file_floresta)]
+  pairs[, floresta_partner := fifelse(grepl("^L01_", toupper(file_floresta)), "L01",
+                                      fifelse(grepl("^L02_", toupper(file_floresta)), "L02", NA_character_))]
   
-  if (nrow(paired) < 50) {
-    message(">>> Step 6C: too few paired points (n=", nrow(paired), "); skipping.")
+  # enforce L01-only, same as step5_concordance()
+  pairs <- pairs[floresta_partner == "L01"]
+  
+  if (nrow(pairs) == 0) {
+    message(">>> STEP 5B: No paired dots found after L01 filtering. Skipping pooled scatter.")
     return(invisible(NULL))
   }
   
-  # correlations (pooled)
-  pear  <- suppressWarnings(stats::cor(paired$clr_flo, paired$clr_pen, method = "pearson"))
-  spear <- suppressWarnings(stats::cor(paired$clr_flo, paired$clr_pen, method = "spearman"))
+  # same delta columns as per-code (for exporting / optional debugging)
+  pairs[, deltaCLR := CLR_Peneira - CLR_Floresta]
+  pairs[, abs_deltaCLR := abs(deltaCLR)]
   
-  # optional labeling: biggest absolute deviation from y=x
-  paired[, delta := clr_pen - clr_flo]
-  paired[, abs_delta := abs(delta)]
-  data.table::setorder(paired, -abs_delta)
+  # export-friendly ordering (same spirit as per-code)
+  df_out <- pairs[order(-abs_deltaCLR, pairing_code, genus, replicate, file_peneira, file_floresta)]
   
-  # plotting mapping
-  if (color_by == "pairing_code") {
-    aes_col <- ggplot2::aes(color = pairing_code)
-  } else if (color_by == "replicate") {
-    aes_col <- ggplot2::aes(color = replicate)
-  } else {
-    aes_col <- ggplot2::aes()
-  }
+  # Pearson correlation across ALL pooled dots
+  ct <- suppressWarnings(cor.test(pairs$CLR_Floresta, pairs$CLR_Peneira, method = "pearson"))
+  r <- unname(ct$estimate); r2 <- r^2; pval <- ct$p.value
   
-  p <- ggplot2::ggplot(paired, ggplot2::aes(x = clr_flo, y = clr_pen)) +
-    ggplot2::geom_point(aes_col, alpha = point_alpha, size = point_size) +
-    ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dashed", alpha = 0.6) +
-    ggplot2::geom_vline(xintercept = 0, linetype = "dotted", alpha = 0.35) +
-    ggplot2::geom_hline(yintercept = 0, linetype = "dotted", alpha = 0.35) +
-    ggplot2::labs(
-      title = "Genus CLR concordance (pooled across all codes): Floresta vs Peneira",
-      subtitle = paste0(
-        "Each dot = (code × replicate × genus). ",
-        "Pearson r=", signif(pear, 3), " | Spearman ρ=", signif(spear, 3),
-        " | MODE=", MODE, " | source=", clr_obj$source, " | pc=", clr_obj$pseudocount
-      ),
-      x = "Floresta CLR (per sample, per genus)",
-      y = "Peneira CLR (paired sample, per genus)",
-      color = if (color_by == "none") NULL else color_by
+  # aesthetically matched plot
+  p <- ggplot(pairs, aes(x = CLR_Floresta, y = CLR_Peneira)) +
+    geom_point(alpha = 0.55, size = 1.2) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.6,
+                linetype = "dashed", color = "grey30", alpha = .5) +
+    labs(
+      title = paste0("ALL codes pooled | Pearson R² = ", sprintf("%.2f", r2), ", p = ", signif(pval, 2)),
+      x = "\nCLR (Floresta samples)",
+      y = "CLR (Peneira samples)\n"
     ) +
-    ggplot2::theme_classic(base_size = 12) +
-    ggplot2::theme(legend.position = if (color_by == "none") "none" else "right")
+    theme_classic(base_size = 12)
   
-  # optional point labels
-  if (label_top_n > 0) {
-    lab <- paired[1:min(label_top_n, .N)]
-    lab[, label := paste0(genus, " | code=", pairing_code, " | rep=", replicate)]
-    if (requireNamespace("ggrepel", quietly = TRUE)) {
-      p <- p + ggrepel::geom_text_repel(
-        data = lab,
-        ggplot2::aes(label = label),
-        size = 2.8,
-        max.overlaps = Inf,
-        box.padding = 0.25,
-        point.padding = 0.2
-      )
-    } else {
-      p <- p + ggplot2::geom_text(
-        data = lab,
-        ggplot2::aes(label = label),
-        size = 2.6,
-        vjust = -0.6
-      )
-    }
-  }
+  ggsave(file.path(corr_dir, paste0(prefix, "_ALLCODES_L01_scatter.png")),
+         p, width = 5.2, height = 4.2, dpi = 300)
+  ggsave(file.path(corr_dir, paste0(prefix, "_ALLCODES_L01_scatter.pdf")),
+         p, width = 5.2, height = 4.2)
   
-  # save
-  out_base <- file.path(PLOTS_DIR, paste0(prefix, "_allcodes_CLR_concordance"))
-  ggplot2::ggsave(paste0(out_base, ".png"), p, width = 6.6, height = 6.0, dpi = 300)
-  ggplot2::ggsave(paste0(out_base, ".pdf"), p, width = 6.6, height = 6.0)
-  
-  # save table (useful for debugging)
-  data.table::fwrite(
-    paired,
-    file = file.path(TABLES_DIR, paste0(prefix, "_allcodes_CLR_concordance_points.tsv")),
-    sep = "\t"
+  fwrite(
+    df_out[, .(pairing_code, replicate, genus,
+               file_peneira, file_floresta, floresta_partner,
+               CLR_Peneira, CLR_Floresta, deltaCLR, abs_deltaCLR, pair_id)],
+    file = file.path(TABLES_DIR, paste0(prefix, "_ALLCODES_L01_paired_dots.tsv")),
+    sep  = "\t"
   )
   
-  message(">>> Step 6C: wrote pooled all-codes CLR concordance plot to: ", out_base, ".{png,pdf}")
-  invisible(list(points = paired, plot = p, pearson = pear, spearman = spear))
+  message(">>> Concordance pooled scatter plot in: ", corr_dir)
+  invisible(list(points = pairs, plot = p, r2 = r2, pval = pval))
 }
 
 # ==========================================================
@@ -1606,16 +1549,7 @@ dt_raw <- obj0$dt_raw
 
 clr_obj <- obj0$clr_obj
 
-# pooled scatter across all codes (each dot = code × replicate × genus)
-step6c_allcodes_clr_concordance(
-  clr_obj    = clr_obj,
-  outdir     = outdir,
-  prefix     = prefix,
-  MODE       = MODE,
-  TABLES_DIR = TABLES_DIR,
-  PLOTS_DIR  = PLOTS_DIR,
-  color_by   = "pairing_code"   # or "replicate" or "none"
-)
+step6b_concordance_allcodes(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
 
 #Capture Step 7 output; use USE_COUNTS_ANCOM
 #res7 <- step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
