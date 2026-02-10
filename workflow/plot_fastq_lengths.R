@@ -51,7 +51,7 @@ make_boxplot <- function(){
     ggplot2::labs(title = "Read-length distribution per FASTQ (violin + box, outliers hidden)",
                   x = "FASTQ file (base name)", y = "Read length (bp)") +
     ggplot2::theme_bw(base_size = 12) +
-    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1),
+    ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 90, vjust = 0.5, hjust = 1, size = 5),
                    panel.grid.minor = ggplot2::element_blank())
   
   # With per-group runs, there will typically be one facet only; harmless to keep
