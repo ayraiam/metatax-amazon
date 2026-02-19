@@ -150,10 +150,27 @@ add_code_replicate <- function(dt) {
 add_environment <- function(dt) {
   stopifnot("file" %in% names(dt))
   
-  dt[, file_norm := toupper(file)]  # file is already normalized in read_and_shape()
-  
+  dt[, file_norm := toupper(file)]  # file already normalized upstream
   dt[, environment := NA_character_]
   
+  # --- NEW: Macucu mapping (T1-01..T1-08) ---
+  macucu_map <- c(
+    "T1-01" = "Riparia",
+    "T1-02" = "Permanente",
+    "T1-03" = "Permanente",
+    "T1-04" = "Permanente",
+    "T1-05" = "Permanente",
+    "T1-06" = "Permanente",
+    "T1-07" = "Permanente",
+    "T1-08" = "Riparia"
+  )
+  
+  # Match either "T1-01" token or "T1-01_" or "T1-01." etc
+  for (sid in names(macucu_map)) {
+    dt[str_detect(file_norm, fixed(sid)), environment := macucu_map[[sid]]]
+  }
+  
+  # --- FALLBACK: your old rules (keeping them, in case other datasets are mixed in) ---
   rules <- c(
     "^CAMP"     = "Campina",
     "L02_500"   = "Floresta", "L02_1500" = "Floresta", "L02_2500" = "Floresta",
@@ -165,8 +182,9 @@ add_environment <- function(dt) {
     "^PENEIRA"  = "Peneira"
   )
   
+  # Only apply fallback rules to rows still NA
   for (pat in names(rules)) {
-    dt[str_detect(file_norm, pat), environment := rules[[pat]]]
+    dt[is.na(environment) & str_detect(file_norm, pat), environment := rules[[pat]]]
   }
   
   dt[, file_norm := NULL]
@@ -214,6 +232,9 @@ read_and_shape <- function(path){
   # ==========================================================
   
   dt <- add_environment(dt)
+  message(">>> Environment NA count after add_environment(): ", sum(is.na(dt$environment)))
+  message(">>> Example file values (first 10):")
+  print(head(unique(dt$file), 10))
   dt <- add_code_replicate(dt)
   
   if (!"abundance" %in% names(dt)) dt[, abundance := NA_real_]
@@ -468,7 +489,8 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   )
   alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
   
-  alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
+  #alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
+  alpha_df[, environment := factor(environment, levels = c("Riparia","Permanente"))]
   
   data.table::fwrite(alpha_df, file = file.path(TABLES_DIR, paste0(prefix, "_alpha_diversity.tsv")), sep  = "\t")
   
@@ -533,12 +555,18 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   
   theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
   
+  # env_colors <- c(
+  #   "Campina"  = "#FFCC00",
+  #   "Floresta" = "#99CC33",
+  #   "Igarape"  = "#3399FF",
+  #   "Peneira"  = "#FF9900"
+  # )
+  
   env_colors <- c(
-    "Campina"  = "#FFCC00",
-    "Floresta" = "#99CC33",
-    "Igarape"  = "#3399FF",
-    "Peneira"  = "#FF9900"
+    "Riparia"     = "#1F77B4",
+    "Permanente"  = "#FF7F0E"
   )
+
   
   p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
     geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
@@ -583,11 +611,15 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
 # STEP 3: Beta diversity PCoA
 # ==========================================================
 step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
+  # env_colors <- c(
+  #   "Campina"  = "#FFCC00",
+  #   "Floresta" = "#99CC33",
+  #   "Igarape"  = "#3399FF",
+  #   "Peneira"  = "#FF9900"
+  # )
   env_colors <- c(
-    "Campina"  = "#FFCC00",
-    "Floresta" = "#99CC33",
-    "Igarape"  = "#3399FF",
-    "Peneira"  = "#FF9900"
+    "Riparia"     = "#1F77B4",
+    "Permanente"  = "#FF7F0E"
   )
   theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
   
@@ -625,9 +657,16 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
 # ==========================================================
 step4_beta_stats <- function(bray, meta, outdir, prefix, TABLES_DIR) {
   set.seed(2025)
+  
+  meta <- as.data.frame(meta)
+  meta <- meta[!is.na(meta$environment) & meta$environment != "", , drop = FALSE]
   meta$environment <- factor(meta$environment)
   
-  perm <- vegan::adonis2(bray ~ environment, data = meta, permutations = 999)
+  # keep bray rows/cols aligned to filtered meta
+  keep <- rownames(meta)
+  bray <- as.dist(as.matrix(bray)[keep, keep])
+  
+  perm <- vegan::adonis2(bray ~ environment, data = meta, permutations = 999, na.action = na.omit)
   perm_df <- as.data.frame(perm)
   
   fwrite(as.data.table(perm_df, keep.rownames = "term"),
@@ -1531,25 +1570,260 @@ step10_otl_phylogeny_lfc_zeroind <- function(
 }
 
 # ==========================================================
-# Calling functions
+# NanoStats parsing + stripcharts (pre vs post-qc)
+# ==========================================================
+
+# Parse one NanoStats.txt into a named list of metrics
+parse_nanostats_file <- function(f) {
+  x <- readLines(f, warn = FALSE)
+  x <- x[nchar(trimws(x)) > 0]
+  
+  # key-value lines are mostly tab-separated; some have ":" in the key
+  # We’ll parse robustly:
+  # - If a line has a tab, use it as key/value split
+  # - Else, try splitting on ":" (first occurrence) for the Reads >Q* lines
+  parse_line <- function(line) {
+    if (grepl("\t", line)) {
+      parts <- strsplit(line, "\t")[[1]]
+      key <- trimws(parts[1])
+      val <- trimws(parts[2])
+      return(c(key = key, val = val))
+    }
+    if (grepl(":", line)) {
+      parts <- strsplit(line, ":", fixed = TRUE)[[1]]
+      key <- trimws(parts[1])
+      val <- trimws(paste(parts[-1], collapse = ":"))
+      return(c(key = key, val = val))
+    }
+    return(NULL)
+  }
+  
+  kv <- lapply(x, parse_line)
+  kv <- kv[!vapply(kv, is.null, logical(1))]
+  
+  keys <- vapply(kv, function(z) z[["key"]], character(1))
+  vals <- vapply(kv, function(z) z[["val"]], character(1))
+  
+  # Convert the ones you care about
+  out <- list()
+  
+  num_or_na <- function(s) {
+    s <- gsub(",", "", s)
+    suppressWarnings(as.numeric(s))
+  }
+  
+  # Direct numeric fields (these appear as "metric \t value")
+  wanted_direct <- c(
+    "number_of_reads",
+    "number_of_bases",
+    "median_read_length",
+    "mean_read_length",
+    "n50"
+  )
+  
+  for (k in wanted_direct) {
+    hit <- which(keys == k)
+    out[[k]] <- if (length(hit) >= 1) num_or_na(vals[hit[1]]) else NA_real_
+  }
+  
+  # Reads >Q10 / >Q15: value looks like "618899 (100.0%) 462.8Mb"
+  parse_reads_q <- function(k) {
+    hit <- which(keys == k)
+    if (length(hit) == 0) return(list(reads = NA_real_, pct = NA_real_, mb = NA_real_))
+    v <- vals[hit[1]]
+    
+    # reads count at beginning
+    reads <- suppressWarnings(as.numeric(gsub(",", "", sub("\\s.*$", "", v))))
+    
+    # percent inside parentheses
+    pct <- NA_real_
+    m <- regmatches(v, regexec("\\(([-0-9.]+)%\\)", v))[[1]]
+    if (length(m) >= 2) pct <- suppressWarnings(as.numeric(m[2]))
+    
+    # Mb at end (e.g., 462.8Mb)
+    mb <- NA_real_
+    m2 <- regmatches(v, regexec("([0-9.]+)\\s*Mb\\b", v))[[1]]
+    if (length(m2) >= 2) mb <- suppressWarnings(as.numeric(m2[2]))
+    
+    list(reads = reads, pct = pct, mb = mb)
+  }
+  
+  q10 <- parse_reads_q("Reads >Q10")
+  q15 <- parse_reads_q("Reads >Q15")
+  
+  # We’ll store reads counts for plotting (as you requested)
+  out[["Reads >Q10"]] <- q10$reads
+  out[["Reads >Q15"]] <- q15$reads
+  
+  out
+}
+
+# Extract a sample token from the NanoPlot per-file directory name
+# Works for TN-0500 / TS-1500 / T1-0500 etc.
+extract_sample_id_from_path <- function(f) {
+  bn <- basename(dirname(f))  # directory containing NanoStats.txt
+  bn <- toupper(bn)
+  
+  # Example dir contains "..._T1-01_..." (or T1-0100 etc; we normalize to T1-01)
+  m <- regmatches(bn, regexec("\\b(T1|T2)-0*([0-9]{1,2})\\b", bn))[[1]]
+  if (length(m) >= 3) {
+    prefix <- m[2]
+    num <- sprintf("%02d", as.integer(m[3]))
+    return(paste0(prefix, "-", num))
+  }
+  
+  NA_character_
+}
+
+# Map sample -> group (your provided mapping; unknowns become "Unknown")
+sample_group_map <- function() {
+  data.table::data.table(
+    sample_id = c("T1-01","T1-02","T1-03","T1-04","T1-05","T1-06","T1-07","T1-08"),
+    group     = c("Riparia","Permanente","Permanente","Permanente","Permanente","Permanente","Permanente","Riparia")
+  )
+}
+
+# Read all NanoStats from pre + post globs, return long DT for plotting + write TSV
+read_nanostats_prepost <- function(
+    pre_glob  = "results/nanoplot/per_file/nanopore_amplicon_ProjetoMacucu-Jaqueline_T1-0*_16SB-16SA-ITS-LSU_*.trimmed/NanoStats.txt",
+    post_glob = "results/nanoplot/per_file/nanopore_amplicon_ProjetoMacucu-Jaqueline_T1-0*_16SB-16SA-ITS-LSU_*.trimmed.filtered/NanoStats.txt",
+    out_tsv   = NULL
+) {
+  pre_files  <- Sys.glob(pre_glob)
+  post_files <- Sys.glob(post_glob)
+  
+  if (length(pre_files) == 0 && length(post_files) == 0) {
+    message(">>> NanoStats: no files matched either glob. Skipping NanoStats export/plots.")
+    return(NULL)
+  }
+  
+  read_one <- function(f, stage) {
+    met <- parse_nanostats_file(f)
+    sample_id <- extract_sample_id_from_path(f)
+    
+    data.table::data.table(
+      file = f,
+      sample_id = sample_id,
+      stage = stage,
+      number_of_reads     = met[["number_of_reads"]],
+      number_of_bases     = met[["number_of_bases"]],
+      median_read_length  = met[["median_read_length"]],
+      mean_read_length    = met[["mean_read_length"]],
+      n50                 = met[["n50"]],
+      `Reads >Q10`         = met[["Reads >Q10"]],
+      `Reads >Q15`         = met[["Reads >Q15"]]
+    )
+  }
+  
+  dt_pre  <- data.table::rbindlist(lapply(pre_files,  read_one, stage = "pre-"),  fill = TRUE)
+  dt_post <- data.table::rbindlist(lapply(post_files, read_one, stage = "post-qc"), fill = TRUE)
+  dt <- data.table::rbindlist(list(dt_pre, dt_post), use.names = TRUE, fill = TRUE)
+  
+  # attach group mapping
+  gm <- sample_group_map()
+  dt <- merge(dt, gm, by = "sample_id", all.x = TRUE)
+  dt[is.na(group), group := "Unknown"]
+  
+  # long format for plotting
+  metrics <- c("number_of_reads","number_of_bases","median_read_length","mean_read_length","n50","Reads >Q10","Reads >Q15")
+  long <- data.table::melt(
+    dt,
+    id.vars = c("sample_id","group","stage","file"),
+    measure.vars = metrics,
+    variable.name = "metric",
+    value.name = "value"
+  )
+  long <- long[is.finite(value)]
+  
+  # stable facet order
+  long[, metric := factor(metric, levels = metrics)]
+  long[, stage  := factor(stage, levels = c("pre-","post-qc"))]
+  
+  if (!is.null(out_tsv)) {
+    data.table::fwrite(long, out_tsv, sep = "\t")
+  }
+  
+  long
+}
+
+# Plot stripcharts with mean dot + whiskers (mean ± SD) per stage
+plot_nanostats_stripcharts <- function(long_df, out_png, out_pdf) {
+  if (is.null(long_df) || nrow(long_df) == 0) return(invisible(NULL))
+  
+  # mean ± SD whiskers
+  mean_sd <- function(x) {
+    m <- mean(x, na.rm = TRUE)
+    s <- stats::sd(x, na.rm = TRUE)
+    data.frame(y = m, ymin = m - s, ymax = m + s)
+  }
+  
+  p <- ggplot(long_df, aes(x = stage, y = value, color = group)) +
+    ggbeeswarm::geom_quasirandom(width = 0.20, alpha = 0.8, size = 1.6) +
+    # big mean dot + whiskers across ALL groups for each stage
+    stat_summary(aes(group = stage), fun.data = mean_sd, geom = "errorbar",
+                 width = 0.15, inherit.aes = FALSE,
+                 data = long_df) +
+    stat_summary(aes(group = stage), fun = mean, geom = "point",
+                 size = 3.2, inherit.aes = FALSE,
+                 data = long_df) +
+    facet_wrap(~ metric, scales = "free_y", ncol = 3) +
+    labs(x = NULL, y = NULL, color = "Group") +
+    theme_classic(base_size = 12) +
+    theme(
+      legend.position = "right",
+      strip.background = element_rect(fill = "white", colour = NA)
+    )
+  
+  ggsave(out_png, p, width = 12, height = 8, dpi = 300)
+  ggsave(out_pdf, p, width = 12, height = 8)
+  
+  p
+}
+
+
+# ==========================================================
+# Calling functions (RUN ONLY STEPS 1–4)
 # ==========================================================
 merge_batches_if_needed(infile)
 
-obj0 <- step0_read_stage(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR)
+obj0   <- step0_read_stage(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR)
 dt_raw <- obj0$dt_raw
+VAL_0_4 <- obj0$VAL_0_4
+clr_obj <- obj0$clr_obj  # kept if you ever re-enable step5/6+
 
-#step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
-#obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
-#rel  <- obj2$rel
-#meta <- obj2$meta
-#obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
-#bray <- obj3$bray
-#step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
-#step5_concordance(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
+# STEP 1–4
+step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
 
-clr_obj <- obj0$clr_obj
+obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
+rel  <- obj2$rel
+meta <- obj2$meta
 
-step6b_concordance_allcodes(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
+obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
+bray <- obj3$bray
+
+step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
+
+message(">>> Done (Steps 1–4 only). Outputs in:")
+message(">>>   tables: ", TABLES_DIR)
+message(">>>   plots : ", PLOTS_DIR)
+
+# ---- NanoStats export + stripcharts ----
+nanostats_tsv <- file.path(TABLES_DIR, paste0(prefix, "_nanostats_pre_vs_post.tsv"))
+nano_long <- read_nanostats_prepost(out_tsv = nanostats_tsv)
+
+if (!is.null(nano_long)) {
+  plot_nanostats_stripcharts(
+    nano_long,
+    out_png = file.path(PLOTS_DIR, paste0(prefix, "_nanostats_stripcharts.png")),
+    out_pdf = file.path(PLOTS_DIR, paste0(prefix, "_nanostats_stripcharts.pdf"))
+  )
+  message(">>> NanoStats: wrote TSV: ", nanostats_tsv)
+}
+
+
+# clr_obj <- obj0$clr_obj
+# 
+# step6b_concordance_allcodes(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
 
 #Capture Step 7 output; use USE_COUNTS_ANCOM
 #res7 <- step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
@@ -1573,6 +1847,6 @@ step6b_concordance_allcodes(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR
 #   TABLES_DIR      = TABLES_DIR
 # )
 
-message(">>> Done. Outputs in:")
-message(">>>   tables: ", TABLES_DIR)
-message(">>>   plots : ", PLOTS_DIR)
+# message(">>> Done. Outputs in:")
+# message(">>>   tables: ", TABLES_DIR)
+# message(">>>   plots : ", PLOTS_DIR)
