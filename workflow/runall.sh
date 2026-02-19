@@ -43,11 +43,11 @@ USE_COUNTS_5="1"    # Part 5: estimated_counts
 # Dedicated flag for ANCOM-BC2 input (default: estimated_counts)
 USE_COUNTS_ANCOM="1"  # Steps 7-8 (ANCOM-BC2): 1=estimated_counts, 0=abundance
 
-DOWNSTREAM_INFILE_16S="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/tables/abundance_combined.tsv"
-DOWNSTREAM_INFILE_ITS="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/tables_ITS/abundance_combined.tsv"
+DOWNSTREAM_INFILE_16S="/home/t.sousa/metatax_plants/results/tables_16S_b000_n000/abundance_combined.tsv"
+DOWNSTREAM_INFILE_ITS="/home/t.sousa/metatax_plants/results/tables_ITS_b000_n000/abundance_combined.tsv"
 DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_16S"
 
-DOWNSTREAM_OUTDIR="/home/t.sousa/metataxonomy_rds/metatax-amazon/results/plots"
+DOWNSTREAM_OUTDIR="/home/t.sousa/metatax_plants/results/plots"
 DOWNSTREAM_BASENAME="downstream"
 
 usage() {
@@ -92,7 +92,7 @@ usage() {
   echo "  --mode STR             16S or ITS (default: 16S)"
   echo "  --use-counts-0-4 INT   Parts 0–4: 1=estimated_counts, 0=abundance (default: 0)"
   echo "  --use-counts-5   INT   Part 5:   1=estimated_counts, 0=abundance (default: 1)"
-  echo "  --use-counts-ancom INT Steps 7–8: 1=estimated_counts, 0=abundance (default: 1)"  
+  echo "  --use-counts-ancom INT Steps 7–8: 1=estimated_counts, 0=abundance (default: 1)"
   echo
   echo "  -h, --help            Show this help message"
   exit 0
@@ -136,7 +136,7 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="$2"; shift 2 ;;
     --use-counts-0-4) USE_COUNTS_0_4="$2"; shift 2 ;;
     --use-counts-5)   USE_COUNTS_5="$2"; shift 2 ;;
-    --use-counts-ancom) USE_COUNTS_ANCOM="$2"; shift 2 ;;  
+    --use-counts-ancom) USE_COUNTS_ANCOM="$2"; shift 2 ;;
 
     -h|--help) usage ;;
     *) echo "Unknown argument: $1"; usage ;;
@@ -204,7 +204,7 @@ echo "Work dir  : $WDIR"
 echo "MODE      : $MODE"
 echo "USE_COUNTS_0_4: $USE_COUNTS_0_4"
 echo "USE_COUNTS_5  : $USE_COUNTS_5"
-echo "USE_COUNTS_ANCOM: $USE_COUNTS_ANCOM"   
+echo "USE_COUNTS_ANCOM: $USE_COUNTS_ANCOM"
 echo "DOWN_IN   : $DOWNSTREAM_INFILE"
 echo "============================================"
 echo
