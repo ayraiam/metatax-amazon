@@ -602,14 +602,14 @@ export_rank_abundance_tables <- function(dt_raw, value_col, TABLES_DIR, prefix) 
 # STEP 1: Stacked bars
 # ==========================================================
 step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR) {
-  p_family <- make_stacks_no_facet(
+  p_family <- make_env_stacks(
     dt_raw, "family",
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.png")),
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.pdf")),
     N = 20, title_rank = "Family", value_col = VAL_0_4
   )
   
-  p_genus <- make_stacks_no_facet(
+  p_genus <- make_env_stacks(
     dt_raw, "genus",
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.png")),
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.pdf")),
