@@ -151,10 +151,16 @@ add_environment <- function(dt) {
   stopifnot("file" %in% names(dt))
   
   dt[, file_norm := toupper(file)]  # file already normalized upstream
-  dt[, environment := NA_character_]
   
-  # --- NEW: Macucu mapping (T1-01..T1-08) ---
-  macucu_map <- c(
+  # Extract Macucu-style sample_id when present (T1-01..T1-08)
+  dt[, sample_id := stringr::str_match(file_norm, "(T1-[0-9]{2})")[, 2]]
+  
+  # Initialize columns
+  dt[, environment := NA_character_]
+  dt[, age := NA_character_]
+  
+  # --- Macucu mapping (T1-01..T1-08) ---
+  macucu_env_map <- c(
     "T1-01" = "Riparia",
     "T1-02" = "Permanente",
     "T1-03" = "Permanente",
@@ -165,26 +171,41 @@ add_environment <- function(dt) {
     "T1-08" = "Riparia"
   )
   
-  # Match either "T1-01" token or "T1-01_" or "T1-01." etc
-  for (sid in names(macucu_map)) {
-    dt[str_detect(file_norm, fixed(sid)), environment := macucu_map[[sid]]]
-  }
+  macucu_age_map <- c(
+    "T1-01" = "velho",
+    "T1-02" = "adulto",
+    "T1-03" = "velho",
+    "T1-04" = "jovem",
+    "T1-05" = "adulto",
+    "T1-06" = "jovem",
+    "T1-07" = "velho",
+    "T1-08" = "adulto"
+  )
   
-  # --- FALLBACK: your old rules (keeping them, in case other datasets are mixed in) ---
+  # Apply Macucu mappings when sample_id is present
+  dt[!is.na(sample_id), environment := unname(macucu_env_map[sample_id])]
+  dt[!is.na(sample_id),        age := unname(macucu_age_map[sample_id])]
+  
+  # --- FALLBACK: old rules (only for rows still NA) ---
   rules <- c(
     "^CAMP"     = "Campina",
     "L02_500"   = "Floresta", "L02_1500" = "Floresta", "L02_2500" = "Floresta",
     "L02_2900"  = "Igarape",  "L02_3500" = "Floresta", "L02_4500" = "Floresta",
-    "L02_4350"  = "Igarape",  "NS2_550"  = "Igarape",  "L01_4500" = "Floresta",
-    "L01_3500"  = "Floresta", "L01_3050" = "Igarape",  "L01_2500" = "Floresta",
-    "L01_1500"  = "Floresta", "TRAV_0"   = "Igarape",  "L01_500"  = "Floresta",
-    "NS1_50"    = "Igarape",
+    "L02_4350"  = "Igarape",  "L02_4350" = "Igarape",  "NS2_550"  = "Igarape",
+    "L01_4500"  = "Floresta", "L01_3500" = "Floresta", "L01_3050" = "Igarape",
+    "L01_2500"  = "Floresta", "L01_1500" = "Floresta", "TRAV_0"   = "Igarape",
+    "L01_500"   = "Floresta", "NS1_50"   = "Igarape",
     "^PENEIRA"  = "Peneira"
   )
   
-  # Only apply fallback rules to rows still NA
   for (pat in names(rules)) {
-    dt[is.na(environment) & str_detect(file_norm, pat), environment := rules[[pat]]]
+    dt[is.na(environment) & stringr::str_detect(file_norm, pat), environment := rules[[pat]]]
+  }
+  
+  # Optional sanity: if it's Macucu, age must not be NA
+  if (any(!is.na(dt$sample_id) & is.na(dt$age))) {
+    bad <- unique(dt[!is.na(sample_id) & is.na(age), sample_id])
+    stop("Macucu samples with missing age mapping: ", paste(bad, collapse = ", "))
   }
   
   dt[, file_norm := NULL]
@@ -261,19 +282,43 @@ build_matrix <- function(dt, tax_col, value_col = "abundance"){
   stopifnot(tax_col %in% names(dt))
   stopifnot(value_col %in% names(dt))
   
-  long <- dt[, .(file, environment, taxon = get(tax_col), value = get(value_col))]
+  # carry optional columns if they exist
+  has_age <- "age" %in% names(dt)
+  has_sid <- "sample_id" %in% names(dt)
+  
+  if (has_age && has_sid) {
+    long <- dt[, .(file, environment, age, sample_id,
+                   taxon = get(tax_col), value = get(value_col))]
+  } else if (has_age && !has_sid) {
+    long <- dt[, .(file, environment, age,
+                   taxon = get(tax_col), value = get(value_col))]
+  } else if (!has_age && has_sid) {
+    long <- dt[, .(file, environment, sample_id,
+                   taxon = get(tax_col), value = get(value_col))]
+  } else {
+    long <- dt[, .(file, environment,
+                   taxon = get(tax_col), value = get(value_col))]
+  }
+  
   long <- long[is.finite(value)]
   long[taxon == "" | is.na(taxon), taxon := paste0("No ", tax_col)]
-  long <- long[, .(value = sum(value, na.rm = TRUE)), by = .(file, environment, taxon)]
+  long <- long[, .(value = sum(value, na.rm = TRUE)), by = setdiff(names(long), "value")]
   
   wide <- long |>
-    select(file, taxon, value) |>
-    pivot_wider(names_from = taxon, values_from = value, values_fill = 0) |>
+    dplyr::select(file, taxon, value) |>
+    tidyr::pivot_wider(names_from = taxon, values_from = value, values_fill = 0) |>
     as.data.table()
   
-  meta <- unique(long[, .(file, environment)])
+  # metadata: keep extra columns (age/sample_id) if present
+  meta_cols <- c("file", "environment")
+  if (has_age) meta_cols <- c(meta_cols, "age")
+  if (has_sid) meta_cols <- c(meta_cols, "sample_id")
+  
+  meta <- unique(long[, ..meta_cols])
+  
   setkey(meta, file); setkey(wide, file)
   mat <- as.data.frame(wide); rownames(mat) <- mat$file; mat$file <- NULL
+  
   list(mat = mat, meta = meta, long = long)
 }
 
@@ -412,6 +457,68 @@ make_env_stacks <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_ra
   p
 }
 
+make_stacks_no_facet <- function(dt_raw, rank_col, out_png, out_pdf, N = 20, title_rank = "Genus", value_col = "abundance") {
+  if (!rank_col %in% names(dt_raw)) return(invisible(NULL))
+  if (all(is.na(dt_raw[[rank_col]])) || all(dt_raw[[rank_col]] == "")) return(invisible(NULL))
+  
+  shaped <- build_matrix(dt_raw, tax_col = rank_col, value_col = value_col)
+  long <- shaped$long
+  
+  # add sample label (T1-01 etc) if present; else fallback to file
+  if (!("sample_id" %in% names(long))) long[, sample_id := NA_character_]
+  long[, sample_label := fifelse(!is.na(sample_id) & sample_id != "", sample_id, file)]
+  
+  # relative abundance per sample
+  long[, total := sum(value), by = file]
+  long[, rel := fifelse(total > 0, value / total, 0)]
+  
+  # pick top N taxa overall (mean rel across samples)
+  ranks <- long[, .(mean_rel = mean(rel, na.rm = TRUE)), by = taxon][order(-mean_rel, taxon)]
+  top_taxa <- ranks$taxon[1:min(N, nrow(ranks))]
+  
+  long[, taxon2 := ifelse(taxon %in% top_taxa, taxon, "Other")]
+  plot_dt <- long[, .(rel = sum(rel)), by = .(sample_label, file, taxon = taxon2)]
+  
+  # stable ordering on x-axis
+  plot_dt[, sample_label := factor(sample_label, levels = unique(plot_dt$sample_label))]
+  
+  lvl_info <- palette_with_other_first(plot_dt$taxon)
+  plot_dt[, taxon := factor(taxon, levels = lvl_info$levels)]
+  
+  p <- ggplot(plot_dt, aes(x = sample_label, y = rel, fill = taxon)) +
+    geom_col(width = 0.95) +
+    scale_y_continuous(labels = function(z) 100 * z, expand = expansion(mult = c(0, 0.02))) +
+    scale_fill_manual(
+      values = lvl_info$values,
+      breaks = lvl_info$levels,
+      labels = legend_label_wrap(lvl_info$levels),
+      name   = title_rank,
+      drop   = FALSE
+    ) +
+    labs(x = NULL, y = "Relative abundance (%)") +
+    theme_classic(base_size = 12) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+      panel.border = element_blank(),
+      legend.position = "right",
+      strip.background = element_blank()
+    )
+  
+  ggsave(out_png, p, width = 14, height = 5, dpi = 300)
+  ggsave(out_pdf, p, width = 14, height = 5)
+  
+  p
+}
+
+# ---------- shared discrete palette for per-sample coloring ----------
+make_discrete_palette <- function(ids) {
+  ids <- unique(ids[!is.na(ids) & ids != ""])
+  if (length(ids) == 0) return(setNames(character(0), character(0)))
+  
+  cols <- grDevices::colorRampPalette(c("grey70", "steelblue4", "darkorange3"))(length(ids))
+  setNames(cols, ids)
+}
+
 # ==========================================================
 # STEP 0: Read + stage
 # ==========================================================
@@ -443,16 +550,66 @@ step0_read_stage <- function(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_
 }
 
 # ==========================================================
+# Export abundance tables collapsed by taxonomic rank
+# ==========================================================
+export_rank_abundance_tables <- function(dt_raw, value_col, TABLES_DIR, prefix) {
+  
+  export_one_rank <- function(rank_col) {
+    if (!rank_col %in% names(dt_raw)) {
+      message(">>> Skipping abundance export for missing column: ", rank_col)
+      return(NULL)
+    }
+    
+    out <- dt_raw[, .(
+      raw_value = sum(get(value_col), na.rm = TRUE)
+    ), by = .(file, environment, taxon = get(rank_col))]
+    
+    out[is.na(taxon) | taxon == "", taxon := paste0("No ", rank_col)]
+    
+    # relative abundance within each sample
+    out[, sample_total := sum(raw_value, na.rm = TRUE), by = file]
+    out[, relative_abundance := fifelse(sample_total > 0, raw_value / sample_total, 0)]
+    
+    out[, rank := rank_col]
+    setcolorder(out, c("file", "environment", "rank", "taxon",
+                       "raw_value", "sample_total", "relative_abundance"))
+    
+    outfile <- file.path(TABLES_DIR, paste0(prefix, "_", rank_col, "_abundance_table.tsv"))
+    fwrite(out, outfile, sep = "\t")
+    message(">>> Wrote ", rank_col, " abundance table: ", outfile)
+    
+    out
+  }
+  
+  genus_dt  <- export_one_rank("genus")
+  family_dt <- export_one_rank("family")
+  
+  # Emu may call this phylum, not filo
+  phylum_dt <- export_one_rank("phylum")
+  
+  combined <- rbindlist(
+    list(genus_dt, family_dt, phylum_dt),
+    use.names = TRUE,
+    fill = TRUE
+  )
+  
+  combined_file <- file.path(TABLES_DIR, paste0(prefix, "_genus_family_phylum_abundance_table.tsv"))
+  fwrite(combined, combined_file, sep = "\t")
+  message(">>> Wrote combined abundance table: ", combined_file)
+}
+
+# ==========================================================
 # STEP 1: Stacked bars
 # ==========================================================
 step1_stacked_bars <- function(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR) {
-  p_family <- make_env_stacks(
+  p_family <- make_stacks_no_facet(
     dt_raw, "family",
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.png")),
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_family.pdf")),
     N = 20, title_rank = "Family", value_col = VAL_0_4
   )
-  p_genus <- make_env_stacks(
+  
+  p_genus <- make_stacks_no_facet(
     dt_raw, "genus",
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.png")),
     file.path(PLOTS_DIR, paste0(prefix, "_stacks_genus.pdf")),
@@ -476,6 +633,11 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
   mat_rel <- mx_rel$mat
   meta    <- mx_rel$meta
   
+  # Ensure meta has rownames = file, but KEEP the 'file' column for merges
+  meta <- as.data.frame(meta)
+  stopifnot("file" %in% colnames(meta))
+  rownames(meta) <- meta$file
+  
   row_sums <- rowSums(mat_rel, na.rm = TRUE); row_sums[row_sums == 0] <- 1
   rel <- sweep(mat_rel, 1, row_sums, "/")
   
@@ -488,6 +650,12 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
     Simpson = as.numeric(simpson)
   )
   alpha_df <- merge(alpha_df, meta, by = "file", all.x = TRUE)
+  
+  alpha_df[, sample_label := fifelse(!is.na(sample_id) & sample_id != "", sample_id, file)]
+  pal <- make_discrete_palette(alpha_df$sample_label)
+  
+  # order age categories
+  alpha_df[, age := factor(age, levels = c("jovem","adulto","velho"))]
   
   #alpha_df[, environment := factor(environment, levels = c("Campina", "Floresta", "Igarape", "Peneira"))]
   alpha_df[, environment := factor(environment, levels = c("Riparia","Permanente"))]
@@ -567,42 +735,86 @@ step2_alpha <- function(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR) 
     "Permanente"  = "#FF7F0E"
   )
 
+  age_colors <- c(
+    "jovem"  = "#2CA02C",
+    "adulto" = "#9467BD",
+    "velho"  = "#D62728"
+  )
   
-  p_sh <- ggplot(alpha_df, aes(x = environment, y = Shannon, fill = environment, color = environment)) +
-    geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, alpha = 0.5, color = "black", show.legend = FALSE) +
-    geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-    labs(x = "\nEnvironment", y = "Shannon (H')\n", title = "") +
-    scale_fill_manual(values = env_colors) +
-    scale_color_manual(values = env_colors) +
-    theme_base
+  theme_base <- theme_classic(base_size = 12) + theme(panel.grid = element_blank())
   
-  if (!is.null(sig_sh_df) && nrow(sig_sh_df) > 0) {
-    p_sh <- p_sh +
-      geom_segment(data = sig_sh_df, aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE) +
-      geom_text(data = sig_sh_df, aes(x = (x + xend) / 2, y = y, label = label),
-                vjust = -0.3, size = 3, inherit.aes = FALSE)
+  mean_sd <- function(x) {
+    m <- mean(x, na.rm = TRUE)
+    s <- stats::sd(x, na.rm = TRUE)
+    data.frame(y = m, ymin = m - s, ymax = m + s)
   }
   
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_shannon_env.png")), p_sh, width = 3, height = 5, dpi = 300)
+  # --- Shannon (single group) ---
+  p_sh <- ggplot(alpha_df, aes(x = 1, y = Shannon)) +
+    #geom_violin(fill = "grey85", color = NA, alpha = 0.8) +
+    #geom_boxplot(outlier.shape = NA, width = 0.18, fill = NA, color = "grey30") +
+    ggbeeswarm::geom_quasirandom(aes(color = sample_label), width = 0.05, alpha = 0.85, size = 2.8) +
+    stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0, color = "grey70", alpha = 0.75, linewidth = 0.7) +
+    stat_summary(fun = mean, geom = "point", size = 2.2, shape = 21, fill = "grey70", color = "grey70", alpha = 0.75) +
+    scale_color_manual(values = pal, name = "Sample") +
+    scale_x_continuous(breaks = 1, labels = "") +
+    labs(x = NULL, y = "Shannon (H')\n", title = "") +
+    theme_base +
+    theme(axis.ticks.x = element_blank())
   
-  p_sp <- ggplot(alpha_df, aes(x = environment, y = Simpson, fill = environment, color = environment)) +
-    geom_violin(alpha = 0.25, linewidth = 0, position = position_dodge(width = 0.75), show.legend = FALSE) +
-    geom_quasirandom(shape = 21, size = 1, dodge.width = 0.75, alpha = 0.5, color = "black", show.legend = FALSE) +
-    geom_boxplot(outlier.shape = NA, width = 0.3, alpha = 0.9, color = "black", fill = "white", show.legend = FALSE) +
-    labs(x = "\nEnvironment", y = "Simpson (1 - D)\n", title = "") +
-    scale_fill_manual(values = env_colors) +
-    scale_color_manual(values = env_colors) +
-    theme_base
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_shannon_onegroup.png")), p_sh, width = 3.2, height = 5, dpi = 300)
   
-  if (!is.null(sig_sp_df) && nrow(sig_sp_df) > 0) {
-    p_sp <- p_sp +
-      geom_segment(data = sig_sp_df, aes(x = x, xend = xend, y = y, yend = y), inherit.aes = FALSE) +
-      geom_text(data = sig_sp_df, aes(x = (x + xend) / 2, y = y, label = label),
-                vjust = -0.3, size = 3, inherit.aes = FALSE)
+  # --- Simpson (single group) ---
+  p_sp <- ggplot(alpha_df, aes(x = 1, y = Simpson)) +
+    #geom_violin(fill = "grey85", color = NA, alpha = 0.8) +
+    #geom_boxplot(outlier.shape = NA, width = 0.18, fill = NA, color = "grey30") +
+    ggbeeswarm::geom_quasirandom(aes(color = sample_label), width = 0.05, alpha = 0.85, size = 2.8) +
+    stat_summary(fun.data = mean_sd, geom = "errorbar", width = 0, color = "grey70", alpha = 0.75, linewidth = 0.7) +
+    stat_summary(fun = mean, geom = "point", size = 2.2, shape = 21, fill = "grey70", color = "grey70", alpha = 0.75) +
+    scale_color_manual(values = pal, name = "Sample") +
+    scale_x_continuous(breaks = 1, labels = "") +
+    labs(x = NULL, y = "Simpson (1 - D)\n", title = "") +
+    theme_base +
+    theme(axis.ticks.x = element_blank())
+  
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_simpson_onegroup.png")), p_sp, width = 3.2, height = 5, dpi = 300)
+  
+  message(">>> DEBUG step2_alpha():")
+  message(">>>   rel dim = ", paste(dim(rel), collapse=" x "))
+  message(">>>   meta nrow = ", nrow(meta))
+  
+  message(">>>   rownames(rel) NULL? ", is.null(rownames(rel)))
+  message(">>>   rownames(meta) NULL? ", is.null(rownames(meta)))
+  
+  dbg <- function(x) {
+    cat(paste0(x, "\n"), file = stderr())
   }
   
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_alpha_simpson_env.png")), p_sp, width = 3, height = 5, dpi = 300)
+  dbg(">>> head(rownames(rel)):")
+  dbg(paste(head(rownames(rel), 10), collapse = "\n"))
+  
+  dbg(">>> head(rownames(meta)):")
+  dbg(paste(head(rownames(meta), 10), collapse = "\n"))
+  
+  dbg(">>> head(meta$file):")
+  dbg(paste(head(meta$file, 10), collapse = "\n"))
+  
+  dbg(">>> example rel-only names:")
+  dbg(paste(head(setdiff(rownames(rel), rownames(meta)), 5), collapse = "\n"))
+  
+  dbg(">>> example meta-only names:")
+  dbg(paste(head(setdiff(rownames(meta), rownames(rel)), 5), collapse = "\n"))
+  
+  message(">>>   all(rownames(rel) == rownames(meta))? ",
+          (!is.null(rownames(rel)) && !is.null(rownames(meta)) &&
+             length(rownames(rel)) == length(rownames(meta)) &&
+             all(rownames(rel) == rownames(meta))))
+  
+  message(">>>   example rel-only names:")
+  cat(paste(head(setdiff(rownames(rel), rownames(meta)), 5), collapse = "\n"), "\n")
+  
+  message(">>>   example meta-only names:")
+  cat(paste(head(setdiff(rownames(meta), rownames(rel)), 5), collapse = "\n"), "\n")
   
   list(rel = rel, meta = meta, alpha_df = alpha_df)
 }
@@ -625,6 +837,11 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
   
   bray <- vegan::vegdist(rel, method = "bray")
   
+  message(">>> DEBUG step3_beta_pcoa():")
+  message(">>>   bray size = ", attr(bray, "Size"))
+  message(">>>   head(labels(bray)):")
+  cat(paste(head(labels(bray), 10), collapse = "\n"), "\n")
+  
   pcoa <- cmdscale(bray, k = 2, eig = TRUE)
   eig  <- pcoa$eig
   eig[eig < 0] <- 0
@@ -641,13 +858,49 @@ step3_beta_pcoa <- function(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR) {
   
   fwrite(pcoa_df, file = file.path(TABLES_DIR, paste0(prefix, "_pcoa_braycurtis.tsv")), sep = "\t")
   
-  p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = environment)) +
-    geom_point(size = 2.5, alpha = 0.9) +
-    scale_color_manual(values = env_colors, na.value = "grey70") +
-    labs(x = pc1_lab, y = pc2_lab, title = "") +
-    theme_base
+  # ----------------------------------------------------------
+  # Coloring control (default: per-sample palette, not age/env)
+  # Options via env var:
+  #   PCOA_COLOR_BY = sample_id | age | environment | none
+  # Default: sample_id
+  # ----------------------------------------------------------
+  pcoa_df[, sample_label := fifelse(!is.na(sample_id) & sample_id != "", sample_id, file)]
+  pal <- make_discrete_palette(pcoa_df$sample_label)
   
-  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_pcoa_braycurtis_env.png")), p_pcoa, width = 5, height = 4, dpi = 300)
+  PCOA_COLOR_BY <- Sys.getenv("PCOA_COLOR_BY", "sample_id")
+  
+  if (PCOA_COLOR_BY == "none") {
+    p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2)) +
+      geom_point(size = 2.5, alpha = 0.85, color = "grey35") +
+      labs(x = pc1_lab, y = pc2_lab, title = "") +
+      theme_base
+    
+  } else if (PCOA_COLOR_BY %in% c("sample_id", "sample_label")) {
+    p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = sample_label)) +
+      geom_point(size = 2.5, alpha = 0.85) +
+      scale_color_manual(values = pal, name = "Sample") +
+      labs(x = pc1_lab, y = pc2_lab, title = "") +
+      theme_base
+    
+  } else if (PCOA_COLOR_BY %in% c("age", "environment")) {
+    if (!(PCOA_COLOR_BY %in% names(pcoa_df))) {
+      stop("PCoA: requested PCOA_COLOR_BY=", PCOA_COLOR_BY, " but column not found in pcoa_df.")
+    }
+    if (all(is.na(pcoa_df[[PCOA_COLOR_BY]]))) {
+      stop("PCoA: requested PCOA_COLOR_BY=", PCOA_COLOR_BY, " but it's all NA. Check meta merge.")
+    }
+    
+    p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = .data[[PCOA_COLOR_BY]])) +
+      geom_point(size = 2.5, alpha = 0.85) +
+      labs(x = pc1_lab, y = pc2_lab, title = "", color = PCOA_COLOR_BY) +
+      theme_base
+  } else {
+    stop("PCoA: invalid PCOA_COLOR_BY='", PCOA_COLOR_BY,
+         "'. Use: sample_id | age | environment | none")
+  }
+  
+  ggsave(file.path(PLOTS_DIR, paste0(prefix, "_pcoa_braycurtis.png")), p_pcoa,
+         width = 5, height = 4, dpi = 300)
   
   list(bray = bray)
 }
@@ -1659,20 +1912,15 @@ parse_nanostats_file <- function(f) {
 }
 
 # Extract a sample token from the NanoPlot per-file directory name
-# Works for TN-0500 / TS-1500 / T1-0500 etc.
+# Works for T1-01..T1-08 even if the directory has suffixes
 extract_sample_id_from_path <- function(f) {
-  bn <- basename(dirname(f))  # directory containing NanoStats.txt
-  bn <- toupper(bn)
+  bn <- toupper(basename(dirname(f)))  # dir containing NanoStats.txt
   
-  # Example dir contains "..._T1-01_..." (or T1-0100 etc; we normalize to T1-01)
-  m <- regmatches(bn, regexec("\\b(T1|T2)-0*([0-9]{1,2})\\b", bn))[[1]]
-  if (length(m) >= 3) {
-    prefix <- m[2]
-    num <- sprintf("%02d", as.integer(m[3]))
-    return(paste0(prefix, "-", num))
-  }
+  # Match T1-01 even if followed by "_" or other characters
+  m <- stringr::str_match(bn, "(T1|T2)-0*([0-9]{1,2})")
+  if (is.na(m[1, 1])) return(NA_character_)
   
-  NA_character_
+  paste0(m[1, 2], "-", sprintf("%02d", as.integer(m[1, 3])))
 }
 
 # Map sample -> group (your provided mapping; unknowns become "Unknown")
@@ -1725,7 +1973,7 @@ read_nanostats_prepost <- function(
   dt[is.na(group), group := "Unknown"]
   
   # long format for plotting
-  metrics <- c("number_of_reads","number_of_bases","median_read_length","mean_read_length","n50","Reads >Q10","Reads >Q15")
+  metrics <- c("number_of_reads","number_of_bases","mean_read_length","n50","Reads >Q10","Reads >Q15")
   long <- data.table::melt(
     dt,
     id.vars = c("sample_id","group","stage","file"),
@@ -1750,6 +1998,12 @@ read_nanostats_prepost <- function(
 plot_nanostats_stripcharts <- function(long_df, out_png, out_pdf) {
   if (is.null(long_df) || nrow(long_df) == 0) return(invisible(NULL))
   
+  # use sample_id for dot colors (fallback to file if sample_id missing)
+  long_df <- data.table::copy(long_df)
+  long_df[, sample_label := fifelse(!is.na(sample_id) & sample_id != "", sample_id, basename(file))]
+  
+  pal <- make_discrete_palette(long_df$sample_label)
+  
   # mean ± SD whiskers
   mean_sd <- function(x) {
     m <- mean(x, na.rm = TRUE)
@@ -1757,17 +2011,35 @@ plot_nanostats_stripcharts <- function(long_df, out_png, out_pdf) {
     data.frame(y = m, ymin = m - s, ymax = m + s)
   }
   
-  p <- ggplot(long_df, aes(x = stage, y = value, color = group)) +
-    ggbeeswarm::geom_quasirandom(width = 0.20, alpha = 0.8, size = 1.6) +
-    # big mean dot + whiskers across ALL groups for each stage
-    stat_summary(aes(group = stage), fun.data = mean_sd, geom = "errorbar",
-                 width = 0.15, inherit.aes = FALSE,
-                 data = long_df) +
-    stat_summary(aes(group = stage), fun = mean, geom = "point",
-                 size = 3.2, inherit.aes = FALSE,
-                 data = long_df) +
-    facet_wrap(~ metric, scales = "free_y", ncol = 3) +
-    labs(x = NULL, y = NULL, color = "Group") +
+  p <- ggplot(long_df, aes(x = stage, y = value)) +
+    ggbeeswarm::geom_quasirandom(
+      aes(color = sample_label),
+      width = 0.20, alpha = 0.85, size = 2.8
+    ) +
+    # mean ± SD whiskers (no caps)
+    stat_summary(
+      aes(group = stage),
+      fun.data = mean_sd,
+      geom = "errorbar",
+      width = 0,          
+      linewidth = 0.7,
+      color = "grey70",
+      alpha = 0.75
+    ) +
+    # mean point
+    stat_summary(
+      aes(group = stage),
+      fun = mean,
+      geom = "point",
+      size = 2.2,
+      shape = 21,
+      fill = "grey70",
+      color = "grey70",
+      alpha = 0.75
+    ) +
+    facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+    scale_color_manual(values = pal, name = "Sample") +
+    labs(x = NULL, y = NULL) +
     theme_classic(base_size = 12) +
     theme(
       legend.position = "right",
@@ -1780,45 +2052,89 @@ plot_nanostats_stripcharts <- function(long_df, out_png, out_pdf) {
   p
 }
 
+# ==========================================================
+# Calling functions: RUN ONLY STEP 1 + export abundance tables
+# (All other steps kept but commented for later reuse)
+# ==========================================================
 
-# ==========================================================
-# Calling functions (RUN ONLY STEPS 1–4)
-# ==========================================================
 merge_batches_if_needed(infile)
 
-obj0   <- step0_read_stage(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR)
+obj0 <- step0_read_stage(infile, outdir, prefix, USE_COUNTS_0_4, USE_COUNTS_5, TABLES_DIR)
 dt_raw <- obj0$dt_raw
 VAL_0_4 <- obj0$VAL_0_4
-clr_obj <- obj0$clr_obj  # kept if you ever re-enable step5/6+
+clr_obj <- obj0$clr_obj
 
-# STEP 1–4
+# ----------------------------------------------------------
+# Export abundance tables (genus / family / phylum)
+# ----------------------------------------------------------
+export_rank_abundance_tables(
+  dt_raw = dt_raw,
+  value_col = VAL_0_4,
+  TABLES_DIR = TABLES_DIR,
+  prefix = prefix
+)
+
+# ----------------------------------------------------------
+# STEP 1: stacked bar plots (ACTIVE)
+# ----------------------------------------------------------
 step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
 
-obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
-rel  <- obj2$rel
-meta <- obj2$meta
+# ==========================================================
+# BELOW: ALL OTHER STEPS (COMMENTED OUT)
+# ==========================================================
 
-obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
-bray <- obj3$bray
+# STEP 2: Alpha diversity
+# obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
+# rel  <- obj2$rel
+# meta <- obj2$meta
 
-step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
+# STEP 3: Beta diversity (PCoA)
+# obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
+# bray <- obj3$bray
 
-message(">>> Done (Steps 1–4 only). Outputs in:")
+# STEP 4: Beta stats
+# step4_beta_stats(bray, meta, outdir, prefix, TABLES_DIR)
+
+# STEP 5: Concordance (per code)
+# step5_concordance(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
+
+# STEP 6: Concordance (all codes pooled)
+# step6b_concordance_allcodes(clr_obj, outdir, prefix, MODE, TABLES_DIR, PLOTS_DIR)
+
+# STEP 7: ANCOM-BC2 global
+# ancom_out <- step7_ancombc2(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
+
+# STEP 8: ANCOM-BC2 per code
+# step8_ancombc2_by_code(dt_raw, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
+
+# STEP 9: Heatmap
+# step9_heatmap_ancom_sig(dt_raw, ancom_out, outdir, prefix, USE_COUNTS_ANCOM, TABLES_DIR, PLOTS_DIR)
+
+# STEP 10: OpenTree phylogeny
+# step10_otl_phylogeny_lfc_zeroind(
+#   res7_summary = ancom_out,
+#   ancombc2_raw_rds = file.path(TABLES_DIR, paste0(prefix, "_ancombc2_raw.rds")),
+#   outdir = outdir,
+#   prefix = prefix,
+#   PLOTS_DIR = PLOTS_DIR,
+#   TABLES_DIR = TABLES_DIR
+# )
+
+# NanoStats plots
+# nanostats_tsv <- file.path(TABLES_DIR, paste0(prefix, "_nanostats_pre_vs_post.tsv"))
+# nano_long <- read_nanostats_prepost(out_tsv = nanostats_tsv)
+#
+# if (!is.null(nano_long)) {
+#   plot_nanostats_stripcharts(
+#     nano_long,
+#     out_png = file.path(PLOTS_DIR, paste0(prefix, "_nanostats_stripcharts.png")),
+#     out_pdf = file.path(PLOTS_DIR, paste0(prefix, "_nanostats_stripcharts.pdf"))
+#   )
+# }
+
+message(">>> Done: stacked bars only + abundance tables.")
 message(">>>   tables: ", TABLES_DIR)
 message(">>>   plots : ", PLOTS_DIR)
-
-# ---- NanoStats export + stripcharts ----
-nanostats_tsv <- file.path(TABLES_DIR, paste0(prefix, "_nanostats_pre_vs_post.tsv"))
-nano_long <- read_nanostats_prepost(out_tsv = nanostats_tsv)
-
-if (!is.null(nano_long)) {
-  plot_nanostats_stripcharts(
-    nano_long,
-    out_png = file.path(PLOTS_DIR, paste0(prefix, "_nanostats_stripcharts.png")),
-    out_pdf = file.path(PLOTS_DIR, paste0(prefix, "_nanostats_stripcharts.pdf"))
-  )
-  message(">>> NanoStats: wrote TSV: ", nanostats_tsv)
-}
 
 
 # clr_obj <- obj0$clr_obj
