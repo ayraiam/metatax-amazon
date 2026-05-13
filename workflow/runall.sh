@@ -16,6 +16,8 @@ BATCH_TAG="default_batch"
 PRIMER_FWD=""
 PRIMER_REV=""
 SEQ_SUMMARY=""
+QC_LENGTH_DIAGNOSTIC_ONLY=0
+QC_RUN_FILTERING=0
 
 RUN_EMU=1
 RUN_LIBSQC=1
@@ -50,6 +52,8 @@ DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_16S"
 
 DOWNSTREAM_OUTDIR="/home/t.sousa/metatax_plants/results/plots"
 DOWNSTREAM_BASENAME="downstream"
+
+ORIG_ARGS=("$@")
 
 usage() {
   echo "Usage: bash workflow/runall.sh [options]"
@@ -140,11 +144,44 @@ while [[ $# -gt 0 ]]; do
     --use-counts-5)   USE_COUNTS_5="$2"; shift 2 ;;
     --use-counts-ancom) USE_COUNTS_ANCOM="$2"; shift 2 ;;
     --batch-tag) BATCH_TAG="$2"; shift 2 ;;
+    --qc-length-diagnostic-only)
+      QC_LENGTH_DIAGNOSTIC_ONLY=1
+      shift
+      ;;
+
+    --qc-run-filtering)
+      QC_RUN_FILTERING=1
+      DO_QUAL_LEN_FILTER=1
+      shift
+      ;;
+
+    --mean-q)
+      MEANQ="$2"
+      shift 2
+      ;;
+
+    --min-len)
+      LEN_MIN="$2"
+      shift 2
+      ;;
+
+    --max-len)
+      LEN_MAX="$2"
+      shift 2
+      ;;
 
     -h|--help) usage ;;
     *) echo "Unknown argument: $1"; usage ;;
   esac
 done
+
+# Diagnostic-only mode:
+# stop after pre-filter QC/read-length visualization
+if [[ "$QC_LENGTH_DIAGNOSTIC_ONLY" -eq 1 ]]; then
+  RUN_EMU=0
+  RUN_DOWNSTREAM=0
+  BUILD_MARKER_DBS=0
+fi
 
 EMU_PARTITION="${EMU_PARTITION:-$PARTITION}"
 EMU_TIME="${EMU_TIME:-$TIME}"
@@ -234,7 +271,25 @@ export NUMEXPR_NUM_THREADS="$CPUS"
 
 # --- libsQC step ---
 if [[ "$RUN_LIBSQC" -eq 1 ]]; then
+
   echo ">>> Launching libsQC..."
+
+  LIBSQC_EXPORT="ALL"
+  LIBSQC_EXPORT+=",THREADS=${CPUS}"
+  LIBSQC_EXPORT+=",PRIMER_FWD=${PRIMER_FWD}"
+  LIBSQC_EXPORT+=",PRIMER_REV=${PRIMER_REV}"
+  LIBSQC_EXPORT+=",SEQ_SUMMARY=${SEQ_SUMMARY}"
+  LIBSQC_EXPORT+=",PRIMERS_FWD_FILE=${PRIMERS_FWD_FILE}"
+  LIBSQC_EXPORT+=",PRIMERS_REV_FILE=${PRIMERS_REV_FILE}"
+  LIBSQC_EXPORT+=",LIMIT_FASTQS=${LIMIT_FASTQS:-0}"
+  LIBSQC_EXPORT+=",OFFSET_FASTQS=${OFFSET_FASTQS:-0}"
+  LIBSQC_EXPORT+=",BATCH_TAG=${BATCH_TAG}"
+  LIBSQC_EXPORT+=",QC_LENGTH_DIAGNOSTIC_ONLY=${QC_LENGTH_DIAGNOSTIC_ONLY}"
+  LIBSQC_EXPORT+=",QC_RUN_FILTERING=${QC_RUN_FILTERING}"
+  LIBSQC_EXPORT+=",MEANQ=${MEANQ:-10}"
+  LIBSQC_EXPORT+=",LEN_MIN=${LEN_MIN:-200}"
+  LIBSQC_EXPORT+=",LEN_MAX=${LEN_MAX:-3300}"
+
   srun \
     --partition="$PARTITION" \
     --nodes=1 \
@@ -243,19 +298,11 @@ if [[ "$RUN_LIBSQC" -eq 1 ]]; then
     --mem="$MEM" \
     --time="$TIME" \
     --chdir="$WDIR" \
-    --export=ALL,\
-    THREADS="$CPUS",\
-    PRIMER_FWD="$PRIMER_FWD",\
-    PRIMER_REV="$PRIMER_REV",\
-    SEQ_SUMMARY="$SEQ_SUMMARY",\
-    PRIMERS_FWD_FILE="$PRIMERS_FWD_FILE",\
-    PRIMERS_REV_FILE="$PRIMERS_REV_FILE",\
-    LIMIT_FASTQS="${LIMIT_FASTQS:-0}",\
-    OFFSET_FASTQS="${OFFSET_FASTQS:-0}", \
-    BATCH_TAG="$BATCH_TAG" \
+    --export="$LIBSQC_EXPORT" \
     /bin/bash workflow/run_libsQC.sh \
     1>"$OUT_LOG" \
     2>"$ERR_LOG"
+
 else
   echo ">>> Skipping libsQC (--no-qc)"
 fi
@@ -328,7 +375,7 @@ if [[ "$RUN_DOWNSTREAM" -eq 1 ]]; then
     --mem="$DOWNSTREAM_MEM" \
     --time="$DOWNSTREAM_TIME" \
     --chdir="$WDIR" \
-    --export=ALL,ENV_NAME="$DOWNSTREAM_ENV_NAME",INFILE="$DOWNSTREAM_INFILE",OUTDIR="$DOWNSTREAM_OUTDIR",BASENAME="$DOWNSTREAM_BASENAME",MODE="$MODE",USE_COUNTS_0_4="$USE_COUNTS_0_4",USE_COUNTS_5="$USE_COUNTS_5",USE_COUNTS_ANCOM="$USE_COUNTS_ANCOM" \
+    --export=ALL,ENV_NAME="$DOWNSTREAM_ENV_NAME",INFILE="$DOWNSTREAM_INFILE",OUTDIR="$DOWNSTREAM_OUTDIR",BASENAME="$DOWNSTREAM_BASENAME",MODE="$MODE",USE_COUNTS_0_4="$USE_COUNTS_0_4",USE_COUNTS_5="$USE_COUNTS_5",USE_COUNTS_ANCOM="$USE_COUNTS_ANCOM", QC_LENGTH_DIAGNOSTIC_ONLY="$QC_LENGTH_DIAGNOSTIC_ONLY" \
     /bin/bash workflow/run_downstream_analysis.sh \
     1>"$DOWN_OUT_LOG" \
     2>"$DOWN_ERR_LOG"
