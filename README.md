@@ -17,13 +17,44 @@
 ABOUT
 -----
 metatax-amazon is a metataxonomy analysis pipeline developed by AY:RΔ.
-It integrates 16S/ITS amplicon data processing, taxonomic classification,
+It integrates 16S/ITS/LSU amplicon data processing, taxonomic classification,
 and downstream diversity metrics for environmental microbiome studies.
 
 This project was designed for large-scale Amazonian soil and water datasets,
 enabling reproducible exploration of microbial community structure and composition.
 </pre>
 
+<pre>
+MARKER-AWARE QC
+---------------
+The QC stage performs marker-aware primer trimming based on FASTQ filenames.
+
+Libraries may contain different combinations of:
+  - 16SA  (archaeal 16S)
+  - 16SB  (bacterial 16S)
+  - ITS
+  - LSU
+
+Example:
+  nanopore_amplicon_SAMPLE_16SA-LSU.fastq.gz
+  → archaeal 16S primers + LSU primers are used
+
+  nanopore_amplicon_SAMPLE_16SB-ITS.fastq.gz
+  → bacterial 16S primers + ITS primers are used
+
+Primer trimming is performed dynamically per library using Cutadapt.
+
+For each FASTQ, the pipeline records:
+  - detected marker groups
+  - forward/reverse primers used
+  - exact Cutadapt command
+  - trimming reports
+
+Outputs:
+  results/<batch>/trim_reports/
+  results/<batch>/summary/primer_trimming_by_library.tsv
+</pre>
+    
 <pre>
 STRUCTURE
 ---------
@@ -49,14 +80,35 @@ DEPENDENCIES
 </pre>
 
 <pre>
-USAGE
------
-After cloning the repository and running `bash bootstrap.sh`, you can execute
-the pipeline via the main launcher:
+BATCH PROCESSING
+----------------
+Large sequencing runs can be processed in batches using:
 
-  bash workflow/runall.sh [options]
+  LIMIT_FASTQS
+  OFFSET_FASTQS
+  BATCH_TAG
 
+This prevents overwriting outputs and enables scalable execution
+across large ONT amplicon datasets.
 
+Example:
+  BATCH_TAG=b000_n050
+  LIMIT_FASTQS=50
+  OFFSET_FASTQS=0
+
+Outputs become batch-specific:
+
+  results/b000_n050/
+  logs/b000_n050_*
+
+Recommended for:
+  - large sequencing projects
+  - Slurm cluster execution
+  - incremental QC / Emu processing
+  - recovery from interrupted runs
+</pre>
+
+<pre>
 MAIN OPTIONS
 -------------
   --partition STR       Partition/queue name (default: short)
@@ -65,6 +117,7 @@ MAIN OPTIONS
   --mem STR             Memory (default: 16G)
   --wd PATH             Working directory (default: current directory)
 
+  --batch-tag STR      Batch identifier used for results and logs
   --primer-fwd SEQ      Forward primer sequence (optional)
   --primer-rev SEQ      Reverse primer sequence (optional)
   --seq-summary PATH    Path to sequencing_summary.txt (optional)
@@ -158,38 +211,52 @@ bash workflow/runall.sh --only-build-marker-dbs
 # 4) Run ONLY the QC stage
 bash workflow/runall.sh --no-emu --no-downstream
 
-# 5) Run ONLY Emu (QC already done) on 16S
+# QC in batches (recommended for large projects)
+
+# 5) First 50 libraries
+BATCH_TAG=b000_n050 \
+LIMIT_FASTQS=50 OFFSET_FASTQS=0 \
+bash workflow/runall.sh \
+  --no-emu --no-downstream
+
+# 6) Next 50 libraries
+BATCH_TAG=b050_n050 \
+LIMIT_FASTQS=50 OFFSET_FASTQS=50 \
+bash workflow/runall.sh \
+  --no-emu --no-downstream
+
+# 7) Run ONLY Emu (QC already done) on 16S
 bash workflow/runall.sh --no-qc --no-downstream
 
-# 6) Run Emu on ALL FASTQs (disable 3-file test limit) for 16S
+# 8) Run Emu on ALL FASTQs (disable 3-file test limit) for 16S
 LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --no-downstream
 
-# 7) Run QC + Emu, but give Emu more resources
+# 9) Run QC + Emu, but give Emu more resources
 bash workflow/runall.sh \
   --time 06:00:00 --cpus 8 --mem 32G \
   --emu-time 12:00:00 --emu-cpus 16 --emu-mem 64G
 
-# 8) Run Emu with a custom ITS DB
+# 10) Run Emu with a custom ITS DB
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-db-its /path/to/its_db
 
-# 9) Run Emu with a custom LSU DB
+# 11) Run Emu with a custom LSU DB
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-db-lsu /path/to/lsu_db
 
-# 10) Run Emu on a custom FASTQ directory (skip QC)
+# 12) Run Emu on a custom FASTQ directory (skip QC)
 FASTQ_DIR_DEFAULT=/path/to/filtered \
 bash workflow/runall.sh --no-qc --no-downstream
 
-# 11) Run ONLY ITS + LSU (skip 16S) on ALL FASTQs
+# 13) Run ONLY ITS + LSU (skip 16S) on ALL FASTQs
 ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=1 \
 bash workflow/runall.sh --no-qc --no-downstream
 
-# 12) Run ONLY 16S (explicit)
+# 14) Run ONLY 16S (explicit)
 ENABLE_16S=1 ENABLE_ITS=0 ENABLE_LSU=0 \
 bash workflow/runall.sh --no-qc --no-downstream
 
-# 13) Run ITS ONLY in batches (recommended for large datasets)
+# 15) Run ITS ONLY in batches (recommended for large datasets)
 #     Example: first 25 FASTQs (0–24)
 ENABLE_16S=0 ENABLE_ITS=1 ENABLE_LSU=0 \
 BATCH_TAG=bITS_b000_n025 \
@@ -206,16 +273,16 @@ FASTQ_DIR_DEFAULT=results/filtered \
 bash workflow/runall.sh --no-qc --no-downstream \
   --emu-time 05:00:00 --emu-cpus 20 --emu-mem 32G
 
-# 14) Run ONLY the downstream analysis (16S)
+# 16) Run ONLY the downstream analysis (16S)
 bash workflow/runall.sh --no-qc --no-emu --mode 16S
 
 #     Run ONLY the downstream analysis (ITS)
 bash workflow/runall.sh --no-qc --no-emu --mode ITS
 
-# 15) Run QC + Emu but skip downstream analysis
+# 17) Run QC + Emu but skip downstream analysis
 bash workflow/runall.sh --no-downstream
 
-# 16) Override numeric sources explicitly (rare / advanced):
+# 18) Override numeric sources explicitly (rare / advanced):
 #     - Parts 0–4: stacked bars + alpha/beta
 #     - Part 5: CLR concordance
 #     - Steps 7–8: ANCOM-BC2 differential abundance
@@ -228,16 +295,21 @@ bash workflow/runall.sh --mode 16S \
 <pre>
 OUTPUTS
 -------
- logs/                                   - timestamped job logs
- results/filtered/                       - post-filtered FASTQs
- results/emu_runs_bXXX/                  - per-marker Emu output (16S / ITS / LSU separated)
- results/tables_bXXX/                    - merged abundance & mapping tables
- results/plots_bXXX/                     - genus-level stacked barplots
- results/plots/*_code_concordance*/      - per-code genus CLR concordance scatter plots
- results/plots/*_ancombc2*               - ANCOM-BC2 volcano + tables (Steps 7–8)           
- results/plots/*_heatmap_ancom_sig*      - pheatmap heatmap of ANCOM-BC2 significant genera 
- metadata/                               - FASTQ manifest, JSON dicts, primer lists
-</pre>
+ logs/<batch>_*                         - batch-specific job logs
+ results/<batch>/trimmed/              - primer-trimmed FASTQs
+ results/<batch>/untrimmed/            - reads without detected primers
+ results/<batch>/filtered/             - post-filtered FASTQs
+ results/<batch>/trim_reports/         - Cutadapt reports per library
+ results/<batch>/qc_raw/               - FastQC reports
+ results/<batch>/multiqc/              - MultiQC reports
+ results/<batch>/nanoplot/             - NanoPlot outputs
+ results/<batch>/summary/              - QC summaries and flags
+ results/<batch>/lengths/              - read-length distributions
+ results/emu_runs_*                    - Emu outputs
+ results/tables_*                      - merged abundance tables
+ results/plots_*                       - downstream figures
+ metadata/                             - FASTQ manifests and primer lists
+ </pre>
 
 <pre>
 CITATION
