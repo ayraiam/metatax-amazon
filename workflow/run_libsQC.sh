@@ -416,7 +416,7 @@ quick_len_qual_overview() {
         set +e
         NanoStat --fastq "$f" --threads "${THREADS}" \
           --outdir "${RESULTS}/nanostat/${base}.stat" \
-          --name "${base}" >/devnull
+          --name "${base}" >/dev/null
         set -e
     done
 
