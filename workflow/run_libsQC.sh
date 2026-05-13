@@ -22,6 +22,8 @@ fi
 
 #User-tunable vars for threads and optional primer/summary inputs
 THREADS="${THREADS:-8}"
+LIMIT_FASTQS="${LIMIT_FASTQS:-0}"
+OFFSET_FASTQS="${OFFSET_FASTQS:-0}"
 PRIMER_FWD="${PRIMER_FWD:-}"
 PRIMER_REV="${PRIMER_REV:-}"
 SEQ_SUMMARY="${SEQ_SUMMARY:-}"
@@ -34,7 +36,8 @@ PRIMER_ERR="${PRIMER_ERR:-0.20}"        # max mismatch rate for cutadapt matches
 PRIMER_FWD_LIST="${PRIMER_FWD_LIST:-$PRIMER_FWD}"   # CSV or single value
 PRIMER_REV_LIST="${PRIMER_REV_LIST:-$PRIMER_REV}"   # CSV or single value
 
-RESULTS="${RESULTS:-results}"
+BATCH_TAG="${BATCH_TAG:-default_batch}"
+RESULTS="${RESULTS:-results/${BATCH_TAG}}"
 
 PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
 # PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
@@ -152,40 +155,100 @@ set_all_primers_for_checks() {
 }
 
 global_primer_trim() {
-  echo ">>> Global primer trimming across ALL groups (saving trimmed + untrimmed separately) ..."
-  mkdir -p "${RESULTS}/trimmed" "${RESULTS}/untrimmed" "${RESULTS}/trim_reports"
+  echo ">>> Marker-aware primer trimming based on FASTQ names ..."
+  mkdir -p "${RESULTS}/trimmed" "${RESULTS}/untrimmed" "${RESULTS}/trim_reports" "${RESULTS}/summary"
 
-  # Use ALL group primers for trimming
-  local FWD_ALL=( "$PRIM_FWD_ARCHAEA" "$PRIM_FWD_ASCOMIC" "$PRIM_FWD_BAC" "$PRIM_FWD_BASID" )
-  local REV_ALL=( "$PRIM_REV_ARCHAEA" "$PRIM_REV_ASCOMIC" "$PRIM_REV_BAC" "$PRIM_REV_BASID" )
+  local primer_log="${RESULTS}/summary/primer_trimming_by_library.tsv"
+  echo -e "library\tmarkers_detected\tforward_primers\treverse_primers\tcutadapt_report" > "$primer_log"
 
   for inF in "${FASTQ_FILES[@]}"; do
-    local bn="${inF##*/}"; local b="${bn%.gz}"; b="${b%.fastq}"; b="${b%.fq}"
+    local bn="${inF##*/}"
+    local b="${bn%.gz}"
+    b="${b%.fastq}"
+    b="${b%.fq}"
+
     local out_trim="${RESULTS}/trimmed/${b}.trimmed.fastq.gz"
     local out_untrim="${RESULTS}/untrimmed/${b}.untrimmed.fastq.gz"
     local rpt="${RESULTS}/trim_reports/${b}.cutadapt_report.txt"
 
-    # Build flags: all FWD as -g; all reverse RC as -a
+    local markers=()
+    local fwd_primers=()
+    local rev_primers=()
+
+    if [[ "$bn" == *"16SA"* ]]; then
+      markers+=("16SA")
+      fwd_primers+=("$PRIM_FWD_ARCHAEA")
+      rev_primers+=("$PRIM_REV_ARCHAEA")
+    fi
+
+    if [[ "$bn" == *"16SB"* ]]; then
+      markers+=("16SB")
+      fwd_primers+=("$PRIM_FWD_BAC")
+      rev_primers+=("$PRIM_REV_BAC")
+    fi
+
+    if [[ "$bn" == *"ITS"* ]]; then
+      markers+=("ITS")
+      fwd_primers+=("$PRIM_FWD_ASCOMIC")
+      rev_primers+=("$PRIM_REV_ASCOMIC")
+    fi
+
+    if [[ "$bn" == *"LSU"* ]]; then
+      markers+=("LSU")
+      fwd_primers+=("$PRIM_FWD_BASID")
+      rev_primers+=("$PRIM_REV_BASID")
+    fi
+
+    if [[ ${#markers[@]} -eq 0 ]]; then
+      echo "!!! WARNING: No marker pattern detected for ${bn}. Skipping primer trimming for this file."
+      echo -e "${bn}\tNONE\tNONE\tNONE\tSKIPPED" >> "$primer_log"
+      cp "$inF" "$out_trim"
+      continue
+    fi
+
     local flags=()
-    for fwd in "${FWD_ALL[@]}"; do flags+=( -g "${fwd}" ); done
-    for rev in "${REV_ALL[@]}"; do
-      local rc; rc="$(revcomp_seq "$rev")"
-      flags+=( -a "${rc}" )
+    for fwd in "${fwd_primers[@]}"; do
+      flags+=( -g "$fwd" )
     done
 
-    # One cutadapt pass: save trimmed AND untrimmed separately
+    for rev in "${rev_primers[@]}"; do
+      local rc
+      rc="$(revcomp_seq "$rev")"
+      flags+=( -a "$rc" )
+    done
+
+    echo ">>> Trimming ${bn}"
+    echo "    Markers detected: ${markers[*]}"
+    echo "    Forward primers : ${fwd_primers[*]}"
+    echo "    Reverse primers : ${rev_primers[*]}"
+
+    {
+      echo "Library: ${bn}"
+      echo "Markers detected: ${markers[*]}"
+      echo "Forward primers: ${fwd_primers[*]}"
+      echo "Reverse primers: ${rev_primers[*]}"
+      echo
+      echo "Command:"
+      printf 'cutadapt -j %q --match-read-wildcards --revcomp -e %q ' "${CUTADAPT_THREADS_PER_JOB}" "${PRIMER_ERR}"
+      printf '%q ' "${flags[@]}"
+      printf -- '-o %q --untrimmed-output %q %q\n' "$out_trim" "$out_untrim" "$inF"
+      echo
+      echo "------------------------------------------------------------"
+    } > "$rpt"
+
     cutadapt -j "${CUTADAPT_THREADS_PER_JOB}" \
       --match-read-wildcards --revcomp \
       -e "${PRIMER_ERR}" \
       "${flags[@]}" \
       -o "${out_trim}" \
       --untrimmed-output "${out_untrim}" \
-      "$inF" > "${rpt}" 2>&1
+      "$inF" >> "${rpt}" 2>&1
+
+    echo -e "${bn}\t$(IFS=','; echo "${markers[*]}")\t$(IFS=','; echo "${fwd_primers[*]}")\t$(IFS=','; echo "${rev_primers[*]}")\t${rpt}" >> "$primer_log"
   done
 
-  echo ">>> Global trimming complete."
-  echo "    Trimmed reads  -> ${RESULTS}/trimmed/"
-  echo "    Untrimmed reads -> ${RESULTS}/untrimmed/"
+  echo ">>> Marker-aware primer trimming complete."
+  echo ">>> Primer/library log: ${primer_log}"
 }
 
 # ----------------------------------------------------------
@@ -271,7 +334,30 @@ gather_fastq_files() {
         echo "!!! No FASTQ files found in data/ (expected *.fastq.gz, *.fq.gz, *.fastq, *.fq)"
         return 1
     fi
-    echo ">>> Found ${#FASTQ_FILES[@]} FASTQ files."
+    local TOTAL_FASTQS=${#FASTQ_FILES[@]}
+
+    echo ">>> Found ${TOTAL_FASTQS} FASTQ files before batching."
+
+    # Apply offset/limit batching
+    if [[ "$OFFSET_FASTQS" -gt 0 || "$LIMIT_FASTQS" -gt 0 ]]; then
+
+        local START="$OFFSET_FASTQS"
+
+        if [[ "$LIMIT_FASTQS" -gt 0 ]]; then
+            FASTQ_FILES=( "${FASTQ_FILES[@]:$START:$LIMIT_FASTQS}" )
+        else
+            FASTQ_FILES=( "${FASTQ_FILES[@]:$START}" )
+        fi
+
+        echo ">>> Batch mode enabled:"
+        echo "    OFFSET_FASTQS = $OFFSET_FASTQS"
+        echo "    LIMIT_FASTQS  = $LIMIT_FASTQS"
+    fi
+
+    echo ">>> Using ${#FASTQ_FILES[@]} FASTQ files in this run."
+
+    printf ">>> FASTQs selected:\n"
+    printf "    %s\n" "${FASTQ_FILES[@]}"
 }
 
 # limit to the first 3 fastqs
@@ -286,7 +372,8 @@ limit_to_three_fastqs() {
 build_fastq_meta() {
     echo ">>> Building FASTQ manifest..."
     [ -d metadata ] || mkdir -p metadata
-    out="metadata/fastq_meta.tsv"
+    mkdir -p metadata
+    out="metadata/${BATCH_TAG}_fastq_meta.tsv"
     echo -e "sample\treplicate\tmolecular_feature\tfile_name" > "$out"
 
     for f in "${FASTQ_FILES[@]}"; do
@@ -606,7 +693,7 @@ render_combined_plots() {
 # ----------------------------------------------------------
 log_run_report() {
     [ -d logs ] || mkdir -p logs
-    local logfile="logs/run_report_$(date +%Y%m%d_%H%M%S).txt"
+    local logfile="logs/${BATCH_TAG}_run_report_$(date +%Y%m%d_%H%M%S).txt"
     local end_time=$(date +%s); local runtime=$((end_time - START_TIME))
     local minutes=$((runtime / 60)); local seconds=$((runtime % 60))
     local host=$(hostname)
