@@ -789,12 +789,36 @@ time_function make_fastq_summary
 time_function qc_flags_from_nanoplot
 time_function "plot_fastq_length_boxplots pre ${RESULTS}/lengths"
 
-# === Stage 3: Length/Q filtering (globally)
-time_function filter_amplicons
+# STOP HERE if running only the diagnostic pre-filter QC
+if [[ "${QC_LENGTH_DIAGNOSTIC_ONLY:-0}" -eq 1 ]]; then
+  echo ">>> QC length diagnostic mode complete."
+  echo ">>> Stopping after pre-filter read length plots, before NanoFilt filtering."
+  log_run_report
+  exit 0
+fi
 
-# === Stage 4: Post-filter QC
-# time_function verify_primer_removal
-time_function re_qc_filtered
+# === Stage 3: Length/Q filtering (globally)
+if [[ "${QC_RUN_FILTERING:-0}" -eq 1 ]]; then
+
+  echo ">>> Running NanoFilt quality/length filtering ..."
+  echo ">>> LEN_MIN=${LEN_MIN:-200}"
+  echo ">>> LEN_MAX=${LEN_MAX:-3300}"
+  echo ">>> MEANQ=${MEANQ:-10}"
+
+  time_function filter_amplicons
+
+  # === Stage 4: Post-filter QC
+  echo ">>> Running post-filter QC ..."
+
+  # time_function verify_primer_removal
+  time_function re_qc_filtered
+
+else
+
+  echo ">>> Skipping NanoFilt filtering and post-filter QC."
+  echo ">>> Use --qc-run-filtering to continue after inspecting read length distributions."
+
+fi
 
 #Final report
 log_run_report
