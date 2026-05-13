@@ -12,6 +12,7 @@ TIME="04:00:00"
 CPUS="4"
 MEM="16G"
 WDIR="$PWD"
+BATCH_TAG="default_batch"
 PRIMER_FWD=""
 PRIMER_REV=""
 SEQ_SUMMARY=""
@@ -62,6 +63,7 @@ usage() {
   echo "  --primer-fwd SEQ      Forward primer (optional)"
   echo "  --primer-rev SEQ      Reverse primer (optional)"
   echo "  --seq-summary PATH    sequencing_summary.txt (optional)"
+  echo "  --batch-tag STR       Batch tag for outputs/logs"
   echo
   echo "Stage control:"
   echo "  --no-qc               Skip libsQC"
@@ -137,6 +139,7 @@ while [[ $# -gt 0 ]]; do
     --use-counts-0-4) USE_COUNTS_0_4="$2"; shift 2 ;;
     --use-counts-5)   USE_COUNTS_5="$2"; shift 2 ;;
     --use-counts-ancom) USE_COUNTS_ANCOM="$2"; shift 2 ;;
+    --batch-tag) BATCH_TAG="$2"; shift 2 ;;
 
     -h|--help) usage ;;
     *) echo "Unknown argument: $1"; usage ;;
@@ -184,12 +187,28 @@ if [[ -n "$PRIMER_FWD" ]]; then echo "$PRIMER_FWD" | tr '[:lower:]' '[:upper:]' 
 if [[ -n "$PRIMER_REV" ]]; then echo "$PRIMER_REV" | tr '[:lower:]' '[:upper:]' >> "$PRIMERS_REV_FILE"; fi
 
 TS=$(date +%Y%m%d_%H%M%S)
-OUT_LOG="logs/run_${TS}.out"
-ERR_LOG="logs/run_${TS}.err"
-EMU_OUT_LOG="logs/emu_${TS}.out"
-EMU_ERR_LOG="logs/emu_${TS}.err"
-DOWN_OUT_LOG="logs/downstream_${TS}.out"
-DOWN_ERR_LOG="logs/downstream_${TS}.err"
+
+CMD_LOG="logs/${BATCH_TAG}_run_command_${TS}.txt"
+
+{
+  echo "Run date: $(date)"
+  echo "Working directory: $PWD"
+  echo
+  echo "Submitted command:"
+  printf '%q ' bash workflow/runall.sh "${ORIG_ARGS[@]}"
+  echo
+} > "$CMD_LOG"
+
+echo "Command log: $CMD_LOG"
+
+OUT_LOG="logs/${BATCH_TAG}_run_${TS}.out"
+ERR_LOG="logs/${BATCH_TAG}_run_${TS}.err"
+
+EMU_OUT_LOG="logs/${BATCH_TAG}_emu_${TS}.out"
+EMU_ERR_LOG="logs/${BATCH_TAG}_emu_${TS}.err"
+
+DOWN_OUT_LOG="logs/${BATCH_TAG}_downstream_${TS}.out"
+DOWN_ERR_LOG="logs/${BATCH_TAG}_downstream_${TS}.err"
 
 echo "============================================"
 echo "libsQC:       ${RUN_LIBSQC}"
@@ -224,7 +243,16 @@ if [[ "$RUN_LIBSQC" -eq 1 ]]; then
     --mem="$MEM" \
     --time="$TIME" \
     --chdir="$WDIR" \
-    --export=ALL,THREADS="$CPUS",PRIMER_FWD="$PRIMER_FWD",PRIMER_REV="$PRIMER_REV",SEQ_SUMMARY="$SEQ_SUMMARY",PRIMERS_FWD_FILE="$PRIMERS_FWD_FILE",PRIMERS_REV_FILE="$PRIMERS_REV_FILE" \
+    --export=ALL,\
+    THREADS="$CPUS",\
+    PRIMER_FWD="$PRIMER_FWD",\
+    PRIMER_REV="$PRIMER_REV",\
+    SEQ_SUMMARY="$SEQ_SUMMARY",\
+    PRIMERS_FWD_FILE="$PRIMERS_FWD_FILE",\
+    PRIMERS_REV_FILE="$PRIMERS_REV_FILE",\
+    LIMIT_FASTQS="${LIMIT_FASTQS:-0}",\
+    OFFSET_FASTQS="${OFFSET_FASTQS:-0}", \
+    BATCH_TAG="$BATCH_TAG" \
     /bin/bash workflow/run_libsQC.sh \
     1>"$OUT_LOG" \
     2>"$ERR_LOG"
