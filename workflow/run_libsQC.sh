@@ -475,28 +475,71 @@ primer_spotcheck() {
 }
 
 filter_amplicons() {
-  echo ">>> Global length + Q filtering ..."
-  mkdir -p "${RESULTS}/filtered"
-  # mkdir -p "${PRIMER_TRIM_DIR}"
+  echo ">>> Marker-aware length + Q filtering ..."
+  mkdir -p "${RESULTS}/filtered" "${RESULTS}/summary"
 
-  local MEANQ="${MEANQ:-10}"
-  local LEN_MIN="${LEN_MIN:-200}"
-  local LEN_MAX="${LEN_MAX:-3300}"
+  local DEFAULT_MEANQ="${MEANQ:-10}"
+  local DEFAULT_LEN_MIN="${LEN_MIN:-150}"
+  local DEFAULT_LEN_MAX="${LEN_MAX:-2500}"
 
-  parse_primers
+  local filter_log="${RESULTS}/summary/nanofilt_cutoffs_by_library.tsv"
+  echo -e "library\tmarkers_detected\tmean_q\tlen_min\tlen_max\toutput" > "$filter_log"
 
   for f in "${FASTQ_FILES[@]}"; do
-    base="${f##*/}"; base="${base%.gz}"; base="${base%.fastq}"; base="${base%.fq}"
+    bn="$(basename "$f")"
+    base="${bn%.gz}"
+    base="${base%.fastq}"
+    base="${base%.fq}"
+
     out="${RESULTS}/filtered/${base}.filtered.fastq.gz"
 
-    if [[ "$f" == *.gz ]]; then
-      zcat "$f" | NanoFilt -q "$MEANQ" -l "$LEN_MIN" --maxlength "$LEN_MAX" | gzip > "$out"
+    meanq="$DEFAULT_MEANQ"
+    len_min="$DEFAULT_LEN_MIN"
+    len_max="$DEFAULT_LEN_MAX"
+
+    markers=()
+
+    if [[ "$bn" == *"16SA"* || "$bn" == *"16SB"* ]]; then
+      [[ "$bn" == *"16SA"* ]] && markers+=("16SA")
+      [[ "$bn" == *"16SB"* ]] && markers+=("16SB")
+      len_min=150
+      len_max=2500
+
+    elif [[ "$bn" == *"ITS"* && "$bn" != *"LSU"* ]]; then
+      markers+=("ITS")
+      len_min=150
+      len_max=1000
+
+    elif [[ "$bn" == *"LSU"* && "$bn" != *"ITS"* ]]; then
+      markers+=("LSU")
+      len_min=150
+      len_max=1800
+
+    elif [[ "$bn" == *"ITS"* && "$bn" == *"LSU"* ]]; then
+      markers+=("ITS" "LSU")
+      len_min=150
+      len_max=1800
+
     else
-      cat "$f" | NanoFilt -q "$MEANQ" -l "$LEN_MIN" --maxlength "$LEN_MAX" | gzip > "$out"
+      markers+=("UNKNOWN")
+      echo "!!! WARNING: No marker detected for ${bn}. Using default cutoffs."
     fi
+
+    echo ">>> Filtering ${bn}"
+    echo "    Markers: ${markers[*]}"
+    echo "    NanoFilt: -q ${meanq} -l ${len_min} --maxlength ${len_max}"
+
+    if [[ "$f" == *.gz ]]; then
+      zcat "$f" | NanoFilt -q "$meanq" -l "$len_min" --maxlength "$len_max" | gzip > "$out"
+    else
+      cat "$f" | NanoFilt -q "$meanq" -l "$len_min" --maxlength "$len_max" | gzip > "$out"
+    fi
+
+    echo -e "${bn}\t$(IFS=','; echo "${markers[*]}")\t${meanq}\t${len_min}\t${len_max}\t${out}" >> "$filter_log"
   done
 
   echo ">>> Filtered -> ${RESULTS}/filtered/"
+  echo ">>> NanoFilt cutoff log -> ${filter_log}"
 }
 
 re_qc_filtered() {
