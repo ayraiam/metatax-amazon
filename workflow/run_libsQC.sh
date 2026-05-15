@@ -480,7 +480,7 @@ filter_amplicons() {
 
   local DEFAULT_MEANQ="${MEANQ:-10}"
   local DEFAULT_LEN_MIN="${LEN_MIN:-150}"
-  local DEFAULT_LEN_MAX="${LEN_MAX:-2000}"
+  local DEFAULT_LEN_MAX="${LEN_MAX:-1800}"
 
   local filter_log="${RESULTS}/summary/nanofilt_cutoffs_by_library.tsv"
   echo -e "library\tmarkers_detected\tmean_q\tlen_min\tlen_max\toutput" > "$filter_log"
@@ -503,7 +503,7 @@ filter_amplicons() {
       [[ "$bn" == *"16SA"* ]] && markers+=("16SA")
       [[ "$bn" == *"16SB"* ]] && markers+=("16SB")
       len_min=150
-      len_max=2000
+      len_max=1800
 
     elif [[ "$bn" == *"ITS"* && "$bn" != *"LSU"* ]]; then
       markers+=("ITS")
