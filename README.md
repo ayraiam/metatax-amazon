@@ -1,6 +1,6 @@
 <!-- LOGO -->
 <p align="center">
-  <img src="https://github.com/ayrdelta/.github/blob/main/profile/logo.png" alt="AY:RΔ Logo" width="120"/>
+  <img src="assets/logo-horizontal.png" alt="AY:RΔ Logo" width="160"/>
 </p>
 
 <h1 align="center" style="font-weight: normal;">metatax-amazon</h1>
