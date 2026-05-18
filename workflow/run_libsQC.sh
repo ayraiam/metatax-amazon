@@ -38,6 +38,8 @@ PRIMER_REV_LIST="${PRIMER_REV_LIST:-$PRIMER_REV}"   # CSV or single value
 
 BATCH_TAG="${BATCH_TAG:-default_batch}"
 RESULTS="${RESULTS:-results/${BATCH_TAG}}"
+REUSE_TRIMMED="${REUSE_TRIMMED:-0}"
+TRIMMED_SOURCE_DIR="${TRIMMED_SOURCE_DIR:-/projects/MAdS_Lab/metatax-amazon-complete/results/${BATCH_TAG}/trimmed}"
 
 PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
 # PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
@@ -499,30 +501,32 @@ filter_amplicons() {
 
     markers=()
 
-    if [[ "$bn" == *"16SA"* || "$bn" == *"16SB"* ]]; then
-      [[ "$bn" == *"16SA"* ]] && markers+=("16SA")
-      [[ "$bn" == *"16SB"* ]] && markers+=("16SB")
-      len_min=150
-      len_max=1800
+    [[ "$bn" == *"16SA"* ]] && markers+=("16SA")
+    [[ "$bn" == *"16SB"* ]] && markers+=("16SB")
+    [[ "$bn" == *"ITS"*  ]] && markers+=("ITS")
+    [[ "$bn" == *"LSU"*  ]] && markers+=("LSU")
 
-    elif [[ "$bn" == *"ITS"* && "$bn" != *"LSU"* ]]; then
-      markers+=("ITS")
+    if [[ ${#markers[@]} -eq 0 ]]; then
+      markers+=("UNKNOWN")
+      echo "!!! WARNING: No marker detected for ${bn}. Using default cutoffs."
+    fi
+
+    # Marker-aware cutoff selection
+    if [[ " ${markers[*]} " == *" ITS "* && \
+          " ${markers[*]} " != *" LSU "* && \
+          " ${markers[*]} " != *" 16SA "* && \
+          " ${markers[*]} " != *" 16SB "* ]]; then
+
+      # ITS-only libraries
       len_min=150
       len_max=1000
 
-    elif [[ "$bn" == *"LSU"* && "$bn" != *"ITS"* ]]; then
-      markers+=("LSU")
-      len_min=150
-      len_max=1800
-
-    elif [[ "$bn" == *"ITS"* && "$bn" == *"LSU"* ]]; then
-      markers+=("ITS" "LSU")
-      len_min=150
-      len_max=1800
-
     else
-      markers+=("UNKNOWN")
-      echo "!!! WARNING: No marker detected for ${bn}. Using default cutoffs."
+
+      # 16S, LSU, or mixed-marker libraries
+      len_min=150
+      len_max=1800
+
     fi
 
     echo ">>> Filtering ${bn}"
@@ -805,16 +809,29 @@ time_function gather_fastq_files
 # Prepare combined primer lists for checks/reporting
 set_all_primers_for_checks
 
-# === Stage 1: Single global primer trimming (no classification)
-time_function global_primer_trim
+# === Stage 1: Primer trimming or reuse existing trimmed reads ===
+if [[ "${REUSE_TRIMMED}" -eq 1 ]]; then
+  echo ">>> Reusing existing primer-trimmed FASTQs."
+  echo ">>> Source: ${TRIMMED_SOURCE_DIR}"
 
-# ----------------------------------------------------------
-# From here on, operate on globally trimmed reads only
-# ----------------------------------------------------------
-echo ">>> Switching context to trimmed FASTQs for downstream QC and filtering..."
-shopt -s nullglob
-FASTQ_FILES=( "${RESULTS}/trimmed/"*.trimmed.fastq.gz )
-shopt -u nullglob
+  shopt -s nullglob
+  FASTQ_FILES=( "${TRIMMED_SOURCE_DIR}"/*.trimmed.fastq.gz )
+  shopt -u nullglob
+
+  if [[ ${#FASTQ_FILES[@]} -eq 0 ]]; then
+    echo "!!! No trimmed FASTQs found in: ${TRIMMED_SOURCE_DIR}"
+    exit 1
+  fi
+
+else
+  time_function global_primer_trim
+
+  echo ">>> Switching context to newly trimmed FASTQs..."
+  shopt -s nullglob
+  FASTQ_FILES=( "${RESULTS}/trimmed/"*.trimmed.fastq.gz )
+  shopt -u nullglob
+fi
+
 if [ ${#FASTQ_FILES[@]} -eq 0 ]; then
   echo "!!! No trimmed FASTQs found — aborting."; exit 1;
 fi
@@ -843,10 +860,10 @@ fi
 # === Stage 3: Length/Q filtering (globally)
 if [[ "${QC_RUN_FILTERING:-0}" -eq 1 ]]; then
 
-  echo ">>> Running NanoFilt quality/length filtering ..."
-  echo ">>> LEN_MIN=${LEN_MIN:-200}"
-  echo ">>> LEN_MAX=${LEN_MAX:-3300}"
-  echo ">>> MEANQ=${MEANQ:-10}"
+  echo ">>> Running marker-aware NanoFilt quality/length filtering ..."
+  echo ">>> Default MEANQ=${MEANQ:-10}"
+  echo ">>> Per-library length cutoffs are selected from FASTQ marker names."
+  echo ">>> Exact cutoffs will be written to: ${RESULTS}/summary/nanofilt_cutoffs_by_library.tsv"
 
   time_function filter_amplicons
 
