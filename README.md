@@ -17,7 +17,7 @@
 ABOUT
 -----
 metatax-amazon is a metataxonomy analysis pipeline developed by AY:RΔ.
-It integrates 16S/ITS/LSU amplicon data processing, taxonomic classification,
+It integrates 16S(archaea and bacteria)/ITS/LSU amplicon data processing, taxonomic classification,
 and downstream diversity metrics for environmental microbiome studies.
 
 This project was designed for large-scale Amazonian soil and water datasets,
@@ -25,9 +25,52 @@ enabling reproducible exploration of microbial community structure and compositi
 </pre>
 
 <pre>
+WORKFLOW
+--------
+1. FASTQ discovery
+2. Pre-filter QC and read-length diagnostics
+3. Marker-aware primer trimming
+4. Optional NanoFilt filtering
+5. Post-filter QC
+6. Emu taxonomic classification
+7. Abundance table generation
+8. Downstream diversity and differential abundance analysis
+</pre>
+
+<pre>
+QC DIAGNOSTIC MODE
+------------------
+The pipeline starts with some pre-flight steps, such as pre-filter QC and read-length visualization,
+before NanoFilt filtering is applied.
+
+This mode is useful for:
+  - empirical cutoff selection
+  - marker-specific read-length inspection
+  - mixed-marker library assessment
+  - ITS/LSU overlap diagnostics
+
+Example:
+  bash workflow/runall.sh \
+    --qc-length-diagnostic-only
+
+This generates:
+  - FastQC
+  - MultiQC
+  - NanoPlot
+  - read-length distributions
+
+And stops before:
+  - NanoFilt filtering
+  - Emu
+  - downstream analysis
+</pre>
+
+<pre>
 MARKER-AWARE QC
 ---------------
-The QC stage performs marker-aware primer trimming based on FASTQ filenames.
+Pipeline starts by performing marker-aware primer trimming based on FASTQ filenames (markers should be indicated in
+  FASTQ file names: patterns "16SA", "16SB", "ITS", or/and "LSU" should be present).
+NanoFilt filtering is performed AFTER primer trimming and uses the globally trimmed FASTQs as input.
 
 Libraries may contain different combinations of:
   - 16SA  (archaeal 16S)
@@ -42,13 +85,34 @@ Example:
   nanopore_amplicon_SAMPLE_16SB-ITS.fastq.gz
   → bacterial 16S primers + ITS primers are used
 
-Primer trimming is performed dynamically per library using Cutadapt.
-
+Primer trimming is performed dynamically per library using Cutadapt,
+with primer sets selected automatically from FASTQ filename patterns.
+  
 For each FASTQ, the pipeline records:
   - detected marker groups
   - forward/reverse primers used
   - exact Cutadapt command
   - trimming reports
+
+NanoFilt filtering is also marker-aware and applies
+different read-length cutoffs depending on the detected marker set.
+
+Examples:
+  any 16S-containing library  → 150–1800 bp
+  ITS-only   → 150–1000 bp
+  LSU-only   → 150–1800 bp
+  ITS+LSU mixed libraries → 150–1800 bp
+
+Reads without detected primers are NOT discarded.
+They are written to:
+
+  results/<batch>/untrimmed/
+
+This allows inspection of:
+  - off-target amplicons
+  - unexpected marker combinations
+  - incomplete primer matches
+  - potential library contamination
 
 Outputs:
   results/<batch>/trim_reports/
@@ -56,7 +120,7 @@ Outputs:
 </pre>
     
 <pre>
-STRUCTURE
+STRUCTURE (IMPROVE!!)
 ---------
  /workflow/     - main pipeline scripts
  /envs/         - Conda/Mamba environment YAMLs
@@ -70,7 +134,7 @@ STRUCTURE
 </pre>
 
 <pre>
-DEPENDENCIES
+DEPENDENCIES (IMPROVE!!)
 ------------
  - Python ≥ 3.10
  - R ≥ 4.5                    
@@ -228,9 +292,9 @@ bash workflow/runall.sh \
 # 7) Run ONLY Emu (QC already done) on 16S
 bash workflow/runall.sh --no-qc --no-downstream
 
-# 8) Run Emu on ALL FASTQs (disable 3-file test limit) for 16S
+# 8) Run Emu on ALL filtered FASTQs
 LIMIT_FASTQS=0 bash workflow/runall.sh --no-qc --no-downstream
-
+  
 # 9) Run QC + Emu, but give Emu more resources
 bash workflow/runall.sh \
   --time 06:00:00 --cpus 8 --mem 32G \
@@ -304,6 +368,10 @@ OUTPUTS
  results/<batch>/multiqc/              - MultiQC reports
  results/<batch>/nanoplot/             - NanoPlot outputs
  results/<batch>/summary/              - QC summaries and flags
+   results/<batch>/summary/primer_trimming_by_library.tsv
+   results/<batch>/summary/nanofilt_cutoffs_by_library.tsv
+   results/<batch>/summary/qc_flags.tsv
+   results/<batch>/summary/seqkit_stats.tsv
  results/<batch>/lengths/              - read-length distributions
  results/emu_runs_*                    - Emu outputs
  results/tables_*                      - merged abundance tables
