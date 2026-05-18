@@ -6,11 +6,22 @@
 <h1 align="center" style="font-weight: normal;">metatax-amazon</h1>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/pipeline-HPC--native-green"/>
+  <img src="https://img.shields.io/badge/data-Nanopore-orange"/>
+  <img src="https://img.shields.io/badge/workflow-metataxonomy-blueviolet"/>
+  <img src="https://img.shields.io/badge/markers-16S%20%7C%20ITS%20%7C%20LSU-teal"/>
+  <img src="https://img.shields.io/badge/QC-marker--aware-darkgreen"/>
+  <img src="https://img.shields.io/badge/classifier-Emu-blue"/>
+  <img src="https://img.shields.io/badge/license-MIT-blue"/>
+</p>
+
+<p align="center">
   <code>data and discovery in flow</code><br/>
   <a href="mailto:ayrabioinf@gmail.com">ayrabioinf@gmail.com</a> · 
   <a href="https://www.linkedin.com/company/aryaiam">linkedin here</a>
 </p>
 
+---
 ---
 
 <pre>
