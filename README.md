@@ -38,96 +38,132 @@ enabling reproducible exploration of microbial community structure and compositi
 <pre>
 WORKFLOW
 --------
-1. FASTQ discovery
-2. Pre-filter QC and read-length diagnostics
-3. Marker-aware primer trimming
-4. Optional NanoFilt filtering
-5. Post-filter QC
-6. Emu taxonomic classification
-7. Abundance table generation
-8. Downstream diversity and differential abundance analysis
+1. FASTQ discovery from data/
+2. Marker-aware primer trimming with Cutadapt
+3. Pre-filter QC on primer-trimmed reads
+4. Read-length diagnostics and QC flag generation
+5. Optional marker-aware NanoFilt filtering
+6. Post-filter QC on filtered reads
+7. Emu taxonomic classification
+8. Abundance table generation
+9. Downstream diversity and differential abundance analysis
 </pre>
 
 <pre>
 QC DIAGNOSTIC MODE
 ------------------
-The pipeline starts with some pre-flight steps, such as pre-filter QC and read-length visualization,
-before NanoFilt filtering is applied.
+The QC diagnostic mode performs primer trimming first, then evaluates read quality
+and read-length distributions using the primer-trimmed FASTQs.
 
-This mode is useful for:
-  - empirical cutoff selection
-  - marker-specific read-length inspection
-  - mixed-marker library assessment
-  - ITS/LSU overlap diagnostics
+This mode is useful before applying NanoFilt because it allows empirical inspection
+of marker-specific read-length profiles.
 
 Example:
   bash workflow/runall.sh \
     --qc-length-diagnostic-only
 
-This generates:
-  - FastQC
-  - MultiQC
-  - NanoPlot
-  - read-length distributions
+This runs:
+  - marker-aware primer trimming
+  - FastQC on trimmed reads
+  - MultiQC on trimmed reads
+  - NanoStat / NanoPlot on trimmed reads
+  - SeqKit summary statistics
+  - read-length boxplots
+  - QC flag generation
 
 And stops before:
   - NanoFilt filtering
+  - post-filter QC
   - Emu
   - downstream analysis
+
+Main outputs:
+  results/<batch>/trimmed/
+  results/<batch>/untrimmed/
+  results/<batch>/trim_reports/
+  results/<batch>/qc_raw/
+  results/<batch>/multiqc/
+  results/<batch>/nanoplot/
+  results/<batch>/lengths/
+  results/<batch>/summary/
 </pre>
 
 <pre>
 MARKER-AWARE QC
 ---------------
-Pipeline starts by performing marker-aware primer trimming based on FASTQ filenames (markers should be indicated in
-  FASTQ file names: patterns "16SA", "16SB", "ITS", or/and "LSU" should be present).
-NanoFilt filtering is performed AFTER primer trimming and uses the globally trimmed FASTQs as input.
+QC is marker-aware and based on marker patterns detected in FASTQ file names.
+Supported marker labels include:
 
-Libraries may contain different combinations of:
-  - 16SA  (archaeal 16S)
-  - 16SB  (bacterial 16S)
+  - 16SA  archaeal 16S
+  - 16SB  bacterial 16S
   - ITS
   - LSU
 
-Example:
+Examples:
   nanopore_amplicon_SAMPLE_16SA-LSU.fastq.gz
-  → archaeal 16S primers + LSU primers are used
+  → archaeal 16S + LSU primers are used
 
   nanopore_amplicon_SAMPLE_16SB-ITS.fastq.gz
-  → bacterial 16S primers + ITS primers are used
+  → bacterial 16S + ITS primers are used
 
-Primer trimming is performed dynamically per library using Cutadapt,
-with primer sets selected automatically from FASTQ filename patterns.
-  
-For each FASTQ, the pipeline records:
-  - detected marker groups
-  - forward/reverse primers used
-  - exact Cutadapt command
-  - trimming reports
+Primer trimming is performed with Cutadapt using the primer sets selected from
+the FASTQ name. The pipeline records, for each library:
 
-NanoFilt filtering is also marker-aware and applies
-different read-length cutoffs depending on the detected marker set.
+  - detected markers
+  - forward primers used
+  - reverse primers used
+  - Cutadapt report path
+  - exact Cutadapt command inside the report
 
-Examples:
-  any 16S-containing library  → 150–1800 bp
-  ITS-only   → 150–1000 bp
-  LSU-only   → 150–1800 bp
-  ITS+LSU mixed libraries → 150–1800 bp
-
-Reads without detected primers are NOT discarded.
-They are written to:
+Reads without detected primer matches are not discarded. They are written to:
 
   results/<batch>/untrimmed/
 
-This allows inspection of:
-  - off-target amplicons
-  - unexpected marker combinations
-  - incomplete primer matches
-  - potential library contamination
+Primer-trimmed reads are written to:
 
-Outputs:
-  results/<batch>/trim_reports/
-  results/<batch>/summary/primer_trimming_by_library.tsv
+  results/<batch>/trimmed/
+
+The pre-filter QC plots and read-length boxplots are generated from these
+primer-trimmed reads, not from the original raw FASTQs.
+</pre>
+
+<pre>
+OPTIONAL NANOFILT FILTERING
+---------------------------
+NanoFilt filtering is not applied automatically after diagnostic QC.
+To continue from trimmed-read diagnostics into quality/length filtering, use:
+
+  bash workflow/runall.sh \
+    --qc-run-filtering \
+    --no-emu \
+    --no-downstream
+
+NanoFilt uses the primer-trimmed FASTQs as input and writes filtered FASTQs to:
+
+  results/<batch>/filtered/
+
+Filtering is marker-aware. Current default cutoffs are:
+
+  ITS-only libraries:
+    mean Q >= 10
+    length 150–1000 bp
+
+  16S, LSU, or mixed-marker libraries:
+    mean Q >= 10
+    length 150–1800 bp
+
+For each library, the exact NanoFilt parameters are recorded in:
+
+  results/<batch>/summary/nanofilt_cutoffs_by_library.tsv
+
+After filtering, the pipeline runs post-filter QC:
+
+  - FastQC on filtered reads
+  - MultiQC on filtered reads
+  - NanoStat / NanoPlot on filtered reads
+  - SeqKit summary statistics
+  - post-filter read-length boxplots
+  - QC flag generation
 </pre>
     
 <pre>
@@ -273,34 +309,25 @@ The 16S Emu database (bacteria + archaea) is auto-downloaded at first use.
 EXAMPLES
 ---------
 
-# 1) Run ALL stages (QC → Emu → Downstream) for 16S only (default)
-bash workflow/runall.sh --mode 16S
-(Defaults: Parts 0–4 use abundance; Part 5 uses estimated_counts; ANCOM-BC2 uses estimated_counts)  
-
-# 2) Run ALL stages with custom resources
-bash workflow/runall.sh --time 08:00:00 --cpus 8 --mem 32G
-
-# 3) Build ONLY the ITS/LSU marker databases
-bash workflow/runall.sh --only-build-marker-dbs
-
-# 4) Run ONLY the QC stage
-bash workflow/runall.sh --no-emu --no-downstream
-
-# QC in batches (recommended for large projects)
-
-# 5) First 50 libraries
-BATCH_TAG=b000_n050 \
-LIMIT_FASTQS=50 OFFSET_FASTQS=0 \
+# 1) Run QC diagnostics only (trim primers, inspect read lengths, stop)
+#     Example: first 25 FASTQs (0–24)
+BATCH_TAG=b000_n025 \
+LIMIT_FASTQS=25 \
+OFFSET_FASTQS=0 \
 bash workflow/runall.sh \
-  --no-emu --no-downstream
+  --qc-length-diagnostic-only
 
-# 6) Next 50 libraries
-BATCH_TAG=b050_n050 \
-LIMIT_FASTQS=50 OFFSET_FASTQS=50 \
+# 2) Run QC filtering after inspecting diagnostics
+#     Example: same 25 FASTQs (0–24)
+BATCH_TAG=b000_n025_filter \
+LIMIT_FASTQS=25 \
+OFFSET_FASTQS=0 \
 bash workflow/runall.sh \
-  --no-emu --no-downstream
+  --qc-run-filtering \
+  --no-emu \
+  --no-downstream
 
-# 7) Run ONLY Emu (QC already done) on 16S
+# 7) Run ONLY Emu (QC already done) on 16S (FIX FROM HERE!!)
 bash workflow/runall.sh --no-qc --no-downstream
 
 # 8) Run Emu on ALL filtered FASTQs
@@ -375,7 +402,8 @@ OUTPUTS
  results/<batch>/untrimmed/            - reads without detected primers
  results/<batch>/filtered/             - post-filtered FASTQs
  results/<batch>/trim_reports/         - Cutadapt reports per library
- results/<batch>/qc_raw/               - FastQC reports
+ results/<batch>/qc_raw/               - FastQC reports for primer-trimmed reads
+ results/<batch>/qc_filtered/          - FastQC reports for NanoFilt-filtered reads
  results/<batch>/multiqc/              - MultiQC reports
  results/<batch>/nanoplot/             - NanoPlot outputs
  results/<batch>/summary/              - QC summaries and flags
