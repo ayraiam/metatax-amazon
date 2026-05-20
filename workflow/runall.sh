@@ -333,7 +333,16 @@ if [[ "$RUN_EMU" -eq 1 ]]; then
   export NUMEXPR_NUM_THREADS="$EMU_CPUS"
 
   # Build export list for Emu step (avoid clobbering DB defaults; pass marker flags if set)
-  EMU_EXPORT="ALL,THREADS=$EMU_CPUS,FASTQ_DIR_DEFAULT=${FASTQ_DIR_DEFAULT:-results/filtered},LIMIT_FASTQS=${LIMIT_FASTQS:-1}"
+  EMU_FASTQ_DIR="${FASTQ_DIR_DEFAULT:-results/${BATCH_TAG}/filtered}"
+
+  EMU_EXPORT="ALL"
+  EMU_EXPORT+=",THREADS=$EMU_CPUS"
+  EMU_EXPORT+=",BATCH_TAG=$BATCH_TAG"
+  EMU_EXPORT+=",FASTQ_DIR_DEFAULT=$EMU_FASTQ_DIR"
+  EMU_EXPORT+=",LIMIT_FASTQS=${LIMIT_FASTQS:-0}"
+  EMU_EXPORT+=",OFFSET_FASTQS=${OFFSET_FASTQS:-0}"
+  EMU_EXPORT+=",SAVE_ASSIGN=1"
+  EMU_EXPORT+=",SKIP_ASSIGN=0"
 
   # Only pass custom DB paths if the user explicitly set them
   if [[ -n "$EMU_DB_ITS_DIR" ]]; then
