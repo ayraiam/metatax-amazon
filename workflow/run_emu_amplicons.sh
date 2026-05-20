@@ -50,8 +50,8 @@ BATCH_TAG="${BATCH_TAG:-b000_n000}"          # base tag, e.g. b000_n000
 OVERWRITE_BATCH="${OVERWRITE_BATCH:-0}"      # protect non-empty dirs
 # Marker-specific RUNS/TABLES/PLOTS dirs are set per marker later
 
-SAVE_ASSIGN="${SAVE_ASSIGN:-0}"                        # 1 keeps read-assign matrices; 0 skips (default)
-SKIP_ASSIGN="${SKIP_ASSIGN:-$((1-SAVE_ASSIGN))}"      # collector will avoid loading matrices
+SAVE_ASSIGN="${SAVE_ASSIGN:-1}"
+SKIP_ASSIGN="${SKIP_ASSIGN:-0}"
 
 # ----------------------------------------------------------
 # Helpers
@@ -324,57 +324,110 @@ prepare_batch_dirs() {
   fi
 }
 
+fastq_has_marker() {
+  local fq="$1"
+  local marker="$2"
+  local bn
+  bn=$(basename "$fq")
+
+  case "$marker" in
+    16S)
+      [[ "$bn" == *"16SA"* || "$bn" == *"16SB"* ]]
+      ;;
+    ITS)
+      [[ "$bn" == *"ITS"* ]]
+      ;;
+    LSU)
+      [[ "$bn" == *"LSU"* ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # ----------------------------------------------------------
 # Run Emu per FASTQ (no binning), keep outputs
 # ----------------------------------------------------------
 run_emu_per_fastq() {
   for fq in "${FASTQS[@]}"; do
+
+    # ---------------------------------------
+    # marker filtering
+    # ---------------------------------------
+    if ! fastq_has_marker "$fq" "$CURRENT_MARKER"; then
+      log "Skipping $(basename "$fq") for marker ${CURRENT_MARKER}: marker pattern not detected."
+      continue
+    fi
+
     local base
-    base=$(basename "$fq"); base=${base%.fastq.gz}; base=${base%.fq.gz}; base=${base%.fastq}; base=${base%.fq}
+    base=$(basename "$fq")
+    base=${base%.fastq.gz}
+    base=${base%.fq.gz}
+    base=${base%.fastq}
+    base=${base%.fq}
+
     local outdir="${RUNS_DIR}/${base}"
     mkdir -p "$outdir"
 
-    log "Running Emu (${CURRENT_MARKER}) on ${base} ..."
-    if [[ "${SAVE_ASSIGN}" -eq 1 ]]; then
-      emu abundance \
-        --threads "$THREADS" \
-        --db "$CURRENT_DB_DIR" \
-        --output-dir "$outdir" \
-        --keep-counts \
-        --keep-read-assignments \
-        --output-unclassified \
-        --type "$EMU_TYPE" \
-        "$fq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG" || warn "Emu failed for ${base}"
-    else
-      emu abundance \
-        --threads "$THREADS" \
-        --db "$CURRENT_DB_DIR" \
-        --output-dir "$outdir" \
-        --keep-counts \
-        --output-unclassified \
-        --type "$EMU_TYPE" \
-        "$fq" 2>>"$RUN_LOG" | tee -a "$RUN_LOG" || warn "Emu failed for ${base}"
+    # ---------------------------------------
+    # log exact emu command
+    # ---------------------------------------
+    CMD_LOG="${LOGDIR}/emu_commands_${CURRENT_MARKER}_${BATCH_TAG}.tsv"
+
+    if [[ ! -s "$CMD_LOG" ]]; then
+      echo -e "date\tmarker\tfile\tdb\toutdir\tcommand" > "$CMD_LOG"
     fi
 
-    # write a small per-sample info file with total reads for convenience
+    emu_cmd="emu abundance \
+--threads $THREADS \
+--db $CURRENT_DB_DIR \
+--output-dir $outdir \
+--keep-counts \
+--keep-read-assignments \
+--output-unclassified \
+--type $EMU_TYPE \
+$fq"
+
+    echo -e "$(date)\t${CURRENT_MARKER}\t${fq}\t${CURRENT_DB_DIR}\t${outdir}\t${emu_cmd}" >> "$CMD_LOG"
+
+    # ---------------------------------------
+    # actual run
+    # ---------------------------------------
+    log "Running Emu (${CURRENT_MARKER}) on ${base} ..."
+
+    emu abundance \
+      --threads "$THREADS" \
+      --db "$CURRENT_DB_DIR" \
+      --output-dir "$outdir" \
+      --keep-counts \
+      --keep-read-assignments \
+      --output-unclassified \
+      --type "$EMU_TYPE" \
+      "$fq" \
+      2>>"$RUN_LOG" | tee -a "$RUN_LOG" || warn "Emu failed for ${base}"
+
+    # write a small per-sample info file
     echo -e "file\ttotal_reads" > "${outdir}/input_reads.tsv"
     echo -e "${base}\t$(count_reads "$fq")" >> "${outdir}/input_reads.tsv"
 
-    # --- normalize abundance file to ${outdir}/abundance.tsv ---------------
+    # normalize abundance file
     if [ ! -s "${outdir}/abundance.tsv" ]; then
       cand=$(find "$outdir" -maxdepth 2 -type f \
-               \( -iname "*abundance*.tsv" -o -iname "*abundance*.csv" -o -iname "*abundance*.tsv.gz" -o -iname "*abundance*.csv.gz" \) \
+               \( -iname "*abundance*.tsv" -o -iname "*abundance*.csv" \
+                  -o -iname "*abundance*.tsv.gz" -o -iname "*abundance*.csv.gz" \) \
                | head -n1)
+
       if [ -n "$cand" ]; then
         case "$cand" in
-          *.tsv.gz)    gzip -cd "$cand" > "${outdir}/abundance.tsv" ;;
-          *.csv.gz)    gzip -cd "$cand" | tr ',' '\t' > "${outdir}/abundance.tsv" ;;
-          *.csv)       tr ',' '\t' < "$cand" > "${outdir}/abundance.tsv" ;;
+          *.tsv.gz) gzip -cd "$cand" > "${outdir}/abundance.tsv" ;;
+          *.csv.gz) gzip -cd "$cand" | tr ',' '\t' > "${outdir}/abundance.tsv" ;;
+          *.csv) tr ',' '\t' < "$cand" > "${outdir}/abundance.tsv" ;;
           *.tsv|*.txt) cp -f "$cand" "${outdir}/abundance.tsv" ;;
-          *)           : ;;
         esac
       fi
     fi
+
   done
 }
 
