@@ -39,15 +39,16 @@ DOWNSTREAM_MEM=""
 DOWNSTREAM_ENV_NAME="emu-downstream"
 
 ### downstream input file becomes MODE-dependent (16S vs ITS)
-MODE="16S"          ### 16S or ITS
+MODE="16S"          ### 16S, ITS, or LSU
 USE_COUNTS_0_4="0"  # Parts 0-4: abundance
 USE_COUNTS_5="1"    # Part 5: estimated_counts
 
 # Dedicated flag for ANCOM-BC2 input (default: estimated_counts)
 USE_COUNTS_ANCOM="1"  # Steps 7-8 (ANCOM-BC2): 1=estimated_counts, 0=abundance
 
-DOWNSTREAM_INFILE_16S="/home/t.sousa/metatax_plants/results/tables_16S_b000_n000/abundance_combined.tsv"
-DOWNSTREAM_INFILE_ITS="/home/t.sousa/metatax_plants/results/tables_ITS_b000_n000/abundance_combined.tsv"
+DOWNSTREAM_INFILE_16S="results/tables_16S_lamipp_all_filter/abundance_combined.tsv"
+DOWNSTREAM_INFILE_ITS="results/tables_ITS_lamipp_all_filter/abundance_combined.tsv"
+DOWNSTREAM_INFILE_LSU="results/tables_LSU_lamipp_all_filter/abundance_combined.tsv"
 DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_16S"
 
 DOWNSTREAM_OUTDIR="/home/t.sousa/metatax_plants/results/plots"
@@ -95,7 +96,7 @@ usage() {
   echo "  --downstream-basename STR   Basename prefix for outputs"
   echo
   echo "Mode options (kingdom runs separately by directory):"
-  echo "  --mode STR             16S or ITS (default: 16S)"
+  echo "  --mode STR             16S, ITS, or LSU (default: 16S)"
   echo "  --use-counts-0-4 INT   Parts 0–4: 1=estimated_counts, 0=abundance (default: 0)"
   echo "  --use-counts-5   INT   Part 5:   1=estimated_counts, 0=abundance (default: 1)"
   echo "  --use-counts-ancom INT Steps 7–8: 1=estimated_counts, 0=abundance (default: 1)"
@@ -195,9 +196,16 @@ DOWNSTREAM_MEM="${DOWNSTREAM_MEM:-$MEM}"
 
 ### if user did NOT override --downstream-infile explicitly,
 ### switch default infile based on MODE (16S vs ITS directory)
-if [[ "${DOWNSTREAM_INFILE}" == "${DOWNSTREAM_INFILE_16S}" || "${DOWNSTREAM_INFILE}" == "${DOWNSTREAM_INFILE_ITS}" ]]; then
-  if [[ "$(echo "$MODE" | tr '[:lower:]' '[:upper:]')" == "ITS" ]]; then
+if [[ "${DOWNSTREAM_INFILE}" == "${DOWNSTREAM_INFILE_16S}" || \
+      "${DOWNSTREAM_INFILE}" == "${DOWNSTREAM_INFILE_ITS}" || \
+      "${DOWNSTREAM_INFILE}" == "${DOWNSTREAM_INFILE_LSU}" ]]; then
+
+  MODE_UPPER="$(echo "$MODE" | tr '[:lower:]' '[:upper:]')"
+
+  if [[ "$MODE_UPPER" == "ITS" ]]; then
     DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_ITS"
+  elif [[ "$MODE_UPPER" == "LSU" ]]; then
+    DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_LSU"
   else
     DOWNSTREAM_INFILE="$DOWNSTREAM_INFILE_16S"
   fi
