@@ -2079,14 +2079,14 @@ export_rank_abundance_tables(
 # ----------------------------------------------------------
 step1_stacked_bars(dt_raw, VAL_0_4, outdir, prefix, PLOTS_DIR)
 
+# STEP 2: Alpha diversity
+obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
+rel  <- obj2$rel
+meta <- obj2$meta
+
 # ==========================================================
 # BELOW: ALL OTHER STEPS (COMMENTED OUT)
 # ==========================================================
-
-# STEP 2: Alpha diversity
-# obj2 <- step2_alpha(dt_raw, VAL_0_4, outdir, prefix, TABLES_DIR, PLOTS_DIR)
-# rel  <- obj2$rel
-# meta <- obj2$meta
 
 # STEP 3: Beta diversity (PCoA)
 # obj3 <- step3_beta_pcoa(rel, meta, outdir, prefix, TABLES_DIR, PLOTS_DIR)
