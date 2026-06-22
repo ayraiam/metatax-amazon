@@ -8,6 +8,8 @@
 # ==========================================================
 
 set -euo pipefail
+module load miniconda3/25.9.1
+source "$(conda info --base)/etc/profile.d/conda.sh"
 
 # Initialize conda in non-interactive shells -----------------------
 if ! command -v conda >/dev/null 2>&1; then
@@ -39,7 +41,7 @@ PRIMER_REV_LIST="${PRIMER_REV_LIST:-$PRIMER_REV}"   # CSV or single value
 BATCH_TAG="${BATCH_TAG:-default_batch}"
 RESULTS="${RESULTS:-results/${BATCH_TAG}}"
 REUSE_TRIMMED="${REUSE_TRIMMED:-0}"
-TRIMMED_SOURCE_DIR="${TRIMMED_SOURCE_DIR:-/projects/MAdS_Lab/metatax-amazon-complete/results/${BATCH_TAG}/trimmed}"
+TRIMMED_SOURCE_DIR="${TRIMMED_SOURCE_DIR:-results/${BATCH_TAG}/trimmed}"
 
 PRIMER_CHECK_DIR="${RESULTS}/primer_checks"
 # PRIMER_TRIM_DIR="${RESULTS}/primer_trimming"
@@ -518,14 +520,14 @@ filter_amplicons() {
           " ${markers[*]} " != *" 16SB "* ]]; then
 
       # ITS-only libraries
-      len_min=150
-      len_max=1000
+      len_min="${LEN_MIN:-150}"
+      len_max="${LEN_MAX:-1000}"
 
     else
 
       # 16S, LSU, or mixed-marker libraries
-      len_min=150
-      len_max=1800
+      len_min="${LEN_MIN:-150}"
+      len_max="${LEN_MAX:-1800}"
 
     fi
 
@@ -839,15 +841,17 @@ printf ">>> Found %d trimmed FASTQs:\n" "${#FASTQ_FILES[@]}"
 printf "    %s\n" "${FASTQ_FILES[@]}"
 
 # === Stage 2: QC on trimmed data (no primer checking here) ===
-time_function run_fastqc_all
-time_function run_multiqc
-time_function 'quick_len_qual_overview pre'
-#time_function primer_spotcheck
+if [[ "${SKIP_PRE_QC:-0}" -eq 1 ]]; then
+  echo ">>> Skipping pre-filter QC because SKIP_PRE_QC=1"
+else
+  time_function run_fastqc_all
+  time_function run_multiqc
+  time_function 'quick_len_qual_overview pre'
 
-# Summaries and QC flags (still on trimmed reads)
-time_function make_fastq_summary
-time_function qc_flags_from_nanoplot
-time_function "plot_fastq_length_boxplots pre ${RESULTS}/lengths"
+  time_function make_fastq_summary
+  time_function qc_flags_from_nanoplot
+  time_function "plot_fastq_length_boxplots pre ${RESULTS}/lengths"
+fi
 
 # STOP HERE if running only the diagnostic pre-filter QC
 if [[ "${QC_LENGTH_DIAGNOSTIC_ONLY:-0}" -eq 1 ]]; then
