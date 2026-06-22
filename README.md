@@ -479,6 +479,9 @@ bash workflow/runall.sh \
 
 # 2) Run QC filtering after inspecting diagnostics
 #     Example: same 25 FASTQs (0–24)
+REUSE_TRIMMED=1 \
+TRIMMED_SOURCE_DIR=results/b000_n025/trimmed \
+SKIP_PRE_QC=1 \
 BATCH_TAG=b000_n025_filter \
 LIMIT_FASTQS=25 \
 OFFSET_FASTQS=0 \
