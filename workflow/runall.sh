@@ -295,8 +295,12 @@ if [[ "$RUN_LIBSQC" -eq 1 ]]; then
   LIBSQC_EXPORT+=",QC_LENGTH_DIAGNOSTIC_ONLY=${QC_LENGTH_DIAGNOSTIC_ONLY}"
   LIBSQC_EXPORT+=",QC_RUN_FILTERING=${QC_RUN_FILTERING}"
   LIBSQC_EXPORT+=",MEANQ=${MEANQ:-10}"
-  LIBSQC_EXPORT+=",LEN_MIN=${LEN_MIN:-200}"
-  LIBSQC_EXPORT+=",LEN_MAX=${LEN_MAX:-3300}"
+  if [[ -n "${LEN_MIN:-}" ]]; then
+    LIBSQC_EXPORT+=",LEN_MIN=${LEN_MIN}"
+  fi
+  if [[ -n "${LEN_MAX:-}" ]]; then
+    LIBSQC_EXPORT+=",LEN_MAX=${LEN_MAX}"
+  fi
 
   srun \
     --partition="$PARTITION" \
