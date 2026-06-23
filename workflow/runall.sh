@@ -213,23 +213,25 @@ fi
 
 mkdir -p logs metadata
 
-# Primer lists ----------------------------
-PRIMERS_FWD_FILE="metadata/primers_fwd.list"
-PRIMERS_REV_FILE="metadata/primers_rev.list"
-cat > "$PRIMERS_FWD_FILE" <<'EOF'
-TTCCGGTTGATCCTGCCGGA
-TCCGTAGGTGAACCTGCGG
-AGAGTTTGATCMTGGCTCAG
-ACCCGCTGAACTTAAGC
-EOF
-cat > "$PRIMERS_REV_FILE" <<'EOF'
-TACGGWTACCTTGTTACGACTT
-TCCTCCGCTTATTGATATGC
-GGTTACCTTGTTACGACTT
-TACTACCACCAAGATCT
-EOF
-if [[ -n "$PRIMER_FWD" ]]; then echo "$PRIMER_FWD" | tr '[:lower:]' '[:upper:]' >> "$PRIMERS_FWD_FILE"; fi
-if [[ -n "$PRIMER_REV" ]]; then echo "$PRIMER_REV" | tr '[:lower:]' '[:upper:]' >> "$PRIMERS_REV_FILE"; fi
+## Primer lists ----------------------------
+#PRIMERS_FWD_FILE="metadata/primers_fwd.list"
+#PRIMERS_REV_FILE="metadata/primers_rev.list"
+PRIMERS_FWD_FILE=""
+PRIMERS_REV_FILE=""
+#cat > "$PRIMERS_FWD_FILE" <<'EOF'
+#TTCCGGTTGATCCTGCCGGA
+#TCCGTAGGTGAACCTGCGG
+#AGAGTTTGATCMTGGCTCAG
+#ACCCGCTGAACTTAAGC
+#EOF
+#cat > "$PRIMERS_REV_FILE" <<'EOF'
+#TACGGWTACCTTGTTACGACTT
+#TCCTCCGCTTATTGATATGC
+#GGTTACCTTGTTACGACTT
+#TACTACCACCAAGATCT
+#EOF
+#if [[ -n "$PRIMER_FWD" ]]; then echo "$PRIMER_FWD" | tr '[:lower:]' '[:upper:]' >> "$PRIMERS_FWD_FILE"; fi
+#if [[ -n "$PRIMER_REV" ]]; then echo "$PRIMER_REV" | tr '[:lower:]' '[:upper:]' >> "$PRIMERS_REV_FILE"; fi
 
 TS=$(date +%Y%m%d_%H%M%S)
 
